@@ -2,9 +2,9 @@ import torch
 
 class DigitTokenizer:
     def __init__(self):
-        self.all_chars = "0123456789"
+        self.digit_char = "0123456789*%="
         self.special_tokens = ["<pad>", "<eos>", "<unk>"]
-        self.vocab_list = list(self.all_chars) + self.special_tokens
+        self.vocab_list = list(self.digit_char) + self.special_tokens
         
         self.char_to_int = {char: i for i, char in enumerate(self.vocab_list)}
         self.int_to_char = {i: char for i, char in enumerate(self.vocab_list)}
