@@ -181,6 +181,8 @@ class Trainer:
             'model_state_dict': model.state_dict(),
             'train_loss_history': self.train_loss_history,
             'val_loss_history': self.val_loss_history,
+            'train_accuracy_history': self.train_accuracy_history,
+            'val_acuracy_history': self.val_acuracy_history,
             'epochs_completed': len(self.train_loss_history),
         }
 
@@ -210,7 +212,8 @@ class Trainer:
 
         self.train_loss_history = checkpoint.get('train_loss_history', [])
         self.val_loss_history = checkpoint.get('val_loss_history', [])
+        self.train_accuracy_history = checkpoint.get('train_accuracy_history', [])
+        self.val_accuracy_history = checkpoint.get('val_accuracy_history', [])
 
         print(f"Successfully restored state from {checkpoint_name} (Epochs completed: {checkpoint.get('epochs_completed', len(self.train_loss_history))})")
-        return checkpoint
 
