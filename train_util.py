@@ -182,7 +182,7 @@ class Trainer:
             'train_loss_history': self.train_loss_history,
             'val_loss_history': self.val_loss_history,
             'train_accuracy_history': self.train_accuracy_history,
-            'val_acuracy_history': self.val_acuracy_history,
+            'val_accuracy_history': self.val_accuracy_history,
             'epochs_completed': len(self.train_loss_history),
         }
 
