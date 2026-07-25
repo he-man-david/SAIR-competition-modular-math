@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
 from IPython.display import clear_output, display
 
 
@@ -168,7 +169,136 @@ class Trainer:
             f"Val Acc: {self.val_accuracy_history[-1]:.4f}"
         )
 
+    @staticmethod
+    def plot_test_loss(
+        test_loss_history: list[float],
+        test_accuracy_history: list[float],
+    ):
+        batch_numbers = list(range(10, len(test_loss_history) + 1, 10))
+        plotted_losses = test_loss_history[9::10]
+        plotted_accuracies = test_accuracy_history[9::10]
     
+        clear_output(wait=True)
+    
+        fig, ax1 = plt.subplots(figsize=(14, 8))
+    
+        ax1.plot(
+            batch_numbers,
+            plotted_losses,
+            label="Test Loss",
+            linewidth=2,
+            marker=".",
+        )
+        ax1.set_xlabel("Batch", fontsize=12)
+        ax1.set_ylabel("Cross-Entropy Loss", fontsize=12)
+        ax1.set_ylim(0.0, max(max(plotted_losses), 1.0))
+    
+        ax2 = ax1.twinx()
+    
+        ax2.plot(
+            batch_numbers,
+            plotted_accuracies,
+            label="Test Accuracy",
+            color="orange",
+            linestyle="--",
+            linewidth=2,
+            marker=".",
+        )
+        ax2.set_ylabel("Accuracy", fontsize=12)
+        ax2.set_ylim(0, 1)
+    
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2)
+    
+        ax1.set_title("Test Loss and Accuracy", fontsize=14, fontweight="bold")
+        ax1.grid(True, linestyle="--", alpha=0.6)
+    
+        plt.tight_layout()
+        display(fig)
+        plt.close(fig)
+
+
+    def test(
+        self,
+        model: torch.nn.Module,
+        test_loader: DataLoader,
+        loss_fct,
+        vocab_size: int,
+        max_seq_len: int,
+        pad_id: int
+    ):
+        test_loss_history: list[float] = []
+        test_accuracy_history: list[float] = []
+    
+        model.eval()
+    
+        with torch.no_grad():
+            for batch_index, batch in enumerate(
+                tqdm(test_loader, desc="Testing accuracy"),
+                start=1,
+            ):
+                batch = batch.to(self.device)
+                a, b, tgt = batch.unbind(dim=1)
+    
+                logits = model(a, b, tgt)
+    
+                test_loss = loss_fct(
+                    logits.reshape(-1, vocab_size),
+                    tgt.reshape(-1),
+                )
+    
+                predictions = model.predict(
+                    a,
+                    b,
+                    max_new_tokens=max_seq_len,
+                )
+    
+                test_accuracy = self.compute_accuracy_from_predictions(
+                    predictions,
+                    tgt,
+                    pad_id
+                )
+    
+                test_loss_history.append(test_loss.item())
+                test_accuracy_history.append(float(test_accuracy))
+    
+                if batch_index % 10 == 0:
+                    self.plot_test_loss(
+                        test_loss_history,
+                        test_accuracy_history,
+                    )
+    
+        average_test_loss = sum(test_loss_history) / len(test_loss_history)
+        average_test_accuracy = (
+            sum(test_accuracy_history) / len(test_accuracy_history)
+        )
+    
+        print(
+            f"Test Loss: {average_test_loss:.4f} | "
+            f"Test Accuracy: {average_test_accuracy:.4f}"
+        )
+    
+        return average_test_loss, average_test_accuracy
+
+    
+    @staticmethod
+    def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor, pad_id: int):
+        batch_size, seq_len = targets.shape
+        predictions = logits.argmax(dim=-1)
+        corrects = (predictions == targets) | (targets == pad_id)
+        accuracy = corrects.all(dim=-1)
+    
+        return accuracy.float().mean()
+
+    
+    @staticmethod
+    def compute_accuracy_from_predictions(predictions: torch.Tensor, targets: torch.Tensor, pad_id: int):
+        corrects = (predictions == targets) | (targets == pad_id)
+        accuracy = corrects.all(dim=-1)
+        return accuracy.float().mean()
+
+        
     def save_checkpoint(self, checkpoint_name: str, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None):
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
