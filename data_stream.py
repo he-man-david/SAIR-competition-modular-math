@@ -109,6 +109,117 @@ class MultiplicationDataStream:
 
         return batch
 
+    def create_validation_chunk_loader(
+        self,
+        num_steps: int,
+        lookahead_steps: int = 1_000,
+        batch_size: int | None = None,
+        seed: int = 10_000,
+    ) -> DataLoader:
+        if num_steps <= 0:
+            raise ValueError("num_steps must be greater than 0.")
+    
+        if lookahead_steps < 0:
+            raise ValueError("lookahead_steps must be non-negative.")
+    
+        validation_batch_size = (
+            self.batch_size
+            if batch_size is None
+            else batch_size
+        )
+    
+        if validation_batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0.")
+    
+        validation_rng = random.Random(seed)
+    
+        validation_max = self.current_max * (
+            (1.0 + self.growth_rate) ** lookahead_steps
+        )
+    
+        rehearsal_count = round(
+            validation_batch_size * self.rehearsal_fraction
+        )
+    
+        curriculum_count = (
+            validation_batch_size - rehearsal_count
+        )
+    
+        total_samples = num_steps * validation_batch_size
+    
+        dataset = torch.empty(
+            (
+                total_samples,
+                3,
+                self.max_seq_len,
+            ),
+            dtype=torch.long,
+        )
+    
+        for validation_step in range(num_steps):
+            samples: list[list[list[int]]] = []
+    
+            for _ in range(curriculum_count):
+                a = int(
+                    validation_rng.betavariate(
+                        self.beta_alpha,
+                        self.beta_beta,
+                    )
+                    * validation_max
+                )
+    
+                b = int(
+                    validation_rng.betavariate(
+                        self.beta_alpha,
+                        self.beta_beta,
+                    )
+                    * validation_max
+                )
+    
+                samples.append(
+                    self._encode_sample(a, b)
+                )
+    
+            for _ in range(rehearsal_count):
+                a = validation_rng.randint(
+                    0,
+                    self.rehearsal_max,
+                )
+    
+                b = validation_rng.randint(
+                    0,
+                    self.rehearsal_max,
+                )
+    
+                samples.append(
+                    self._encode_sample(a, b)
+                )
+    
+            validation_rng.shuffle(samples)
+    
+            start_index = (
+                validation_step * validation_batch_size
+            )
+    
+            end_index = (
+                start_index + validation_batch_size
+            )
+    
+            dataset[start_index:end_index] = torch.tensor(
+                samples,
+                dtype=torch.long,
+            )
+    
+            validation_max *= 1.0 + self.growth_rate
+    
+        return DataLoader(
+            dataset,
+            batch_size=validation_batch_size,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=True,
+        )
+
     def create_fixed_loader(
         self,
         num_samples: int,
@@ -164,6 +275,50 @@ class MultiplicationDataStream:
             batch_size=loader_batch_size,
             shuffle=False,
             drop_last=False,
+        )
+    
+    def create_training_chunk_loader(
+        self,
+        num_steps: int,
+        pin_memory: bool = True,
+    ) -> DataLoader:
+        if num_steps <= 0:
+            raise ValueError("num_steps must be greater than 0.")
+
+        max_token_id = max(self.tokenizer.char_to_int.values())
+
+        if max_token_id <= 255:
+            storage_dtype = torch.uint8
+        elif max_token_id <= 32767:
+            storage_dtype = torch.int16
+        else:
+            storage_dtype = torch.int32
+
+        total_samples = num_steps * self.batch_size
+
+        dataset = torch.empty(
+            (
+                total_samples,
+                3,
+                self.max_seq_len,
+            ),
+            dtype=storage_dtype,
+        )
+
+        for chunk_step in range(num_steps):
+            start_index = chunk_step * self.batch_size
+            end_index = start_index + self.batch_size
+
+            dataset[start_index:end_index] = (
+                self.next_batch().to(storage_dtype)
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=True,
+            pin_memory=pin_memory,
         )
 
     def _sample_curriculum_integer(self) -> int:

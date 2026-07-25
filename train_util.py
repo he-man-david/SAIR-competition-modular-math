@@ -3,7 +3,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
-from IPython.display import clear_output, display
+from IPython.display import display
 from matplotlib.ticker import MaxNLocator
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -43,6 +43,7 @@ class Trainer:
             metric_step_history if metric_step_history is not None else []
         )
 
+        self.live_plot_display = None
         self.global_step = 0
         self.checkpoint_dir = Path(checkpoint_dir)
 
@@ -68,105 +69,83 @@ class Trainer:
         self.train_accuracy_history.append(float(train_accuracy))
         self.val_accuracy_history.append(float(val_accuracy))
 
-    def plot_live_loss(self, target_step: int):
+    def plot_live_loss(self, target_step: int) -> None:
         if not self.metric_step_history:
-            raise ValueError("No metric history to plot yet.")
-
-        history_lengths = {
-            len(self.metric_step_history),
-            len(self.train_loss_history),
-            len(self.val_loss_history),
-            len(self.train_accuracy_history),
-            len(self.val_accuracy_history),
-        }
-
-        if len(history_lengths) != 1:
-            raise ValueError(
-                "All metric histories must have the same length."
-            )
-
-        clear_output(wait=True)
-
-        fig, ax1 = plt.subplots(figsize=(14, 8))
-
-        ax1.plot(
+            return
+    
+        fig, loss_axis = plt.subplots(figsize=(14, 8))
+        accuracy_axis = loss_axis.twinx()
+    
+        loss_axis.plot(
             self.metric_step_history,
             self.train_loss_history,
-            label="Training Loss",
+            label="Training loss",
             linewidth=2,
             marker=".",
             markersize=4,
         )
-
-        ax1.plot(
+    
+        loss_axis.plot(
             self.metric_step_history,
             self.val_loss_history,
-            label="Validation Loss",
+            label="Validation loss",
             linewidth=2,
             marker=".",
             markersize=4,
         )
-
-        ax1.set_xlabel("Training Step", fontsize=12)
-        ax1.set_ylabel("Cross-Entropy Loss", fontsize=12)
-        ax1.xaxis.set_major_locator(
-            MaxNLocator(nbins=20, integer=True)
-        )
-
-        ax2 = ax1.twinx()
-
-        ax2.plot(
+    
+        accuracy_axis.plot(
             self.metric_step_history,
             self.train_accuracy_history,
-            label="Training Accuracy",
-            linestyle="--",
+            label="Training accuracy",
             linewidth=2,
-            marker=".",
-            markersize=4,
+            linestyle="--",
         )
-
-        ax2.plot(
+    
+        accuracy_axis.plot(
             self.metric_step_history,
             self.val_accuracy_history,
-            label="Validation Accuracy",
-            linestyle="--",
+            label="Validation accuracy",
             linewidth=2,
-            marker=".",
-            markersize=4,
+            linestyle="--",
         )
-
-        ax2.set_ylabel("Accuracy", fontsize=12)
-        ax2.set_ylim(0, 1)
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-
-        ax1.legend(
-            lines1 + lines2,
-            labels1 + labels2,
-            fontsize=11,
+    
+        loss_axis.set_title("Training and Validation Metrics")
+        loss_axis.set_xlabel("Training step")
+        loss_axis.set_ylabel("Cross-entropy loss")
+        accuracy_axis.set_ylabel("Exact-match accuracy")
+    
+        loss_axis.set_xlim(
+            left=0,
+            right=max(target_step, self.metric_step_history[-1]),
         )
-
-        ax1.set_title(
-            "Training Loss and Accuracy",
-            fontsize=14,
-            fontweight="bold",
+    
+        loss_axis.xaxis.set_major_locator(
+            MaxNLocator(nbins=20, integer=True)
         )
-
-        ax1.grid(True, linestyle="--", alpha=0.6)
-
-        plt.tight_layout()
-        display(fig)
+    
+        loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
+        accuracy_lines, accuracy_labels = (
+            accuracy_axis.get_legend_handles_labels()
+        )
+    
+        loss_axis.legend(
+            loss_lines + accuracy_lines,
+            loss_labels + accuracy_labels,
+            loc="best",
+        )
+    
+        fig.tight_layout()
+    
+        if self.live_plot_display is None:
+            self.live_plot_display = display(
+                fig,
+                display_id=True,
+            )
+        else:
+            self.live_plot_display.update(fig)
+    
         plt.close(fig)
-
-        print(
-            f"Latest Stats -> "
-            f"Step {self.global_step:,}/{target_step:,} | "
-            f"Train Loss: {self.train_loss_history[-1]:.4f} | "
-            f"Val Loss: {self.val_loss_history[-1]:.4f} | "
-            f"Train Acc: {self.train_accuracy_history[-1]:.4f} | "
-            f"Val Acc: {self.val_accuracy_history[-1]:.4f}"
-        )
 
     @staticmethod
     def plot_test_loss(
