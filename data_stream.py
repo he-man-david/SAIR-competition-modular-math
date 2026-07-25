@@ -1,0 +1,168 @@
+import random
+import torch
+from tokenizer import DigitTokenizer
+
+
+class MultiplicationDataStream:
+    def __init__(
+        self,
+        tokenizer: DigitTokenizer,
+        batch_size: int,
+        max_seq_len: int,
+        initial_max: float = 10.0,
+        growth_rate: float = 0.0001,
+        beta_alpha: float = 2.0,
+        beta_beta: float = 5.0,
+        rehearsal_fraction: float = 0.2,
+        rehearsal_max: int = 100,
+        seed: int | None = None,
+    ):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0.")
+
+        if max_seq_len <= 0:
+            raise ValueError("max_seq_len must be greater than 0.")
+
+        if initial_max <= 0:
+            raise ValueError("initial_max must be greater than 0.")
+
+        if growth_rate < 0:
+            raise ValueError("growth_rate must be non-negative.")
+
+        if beta_alpha <= 0 or beta_beta <= 0:
+            raise ValueError("Beta distribution parameters must be positive.")
+
+        if not 0.0 <= rehearsal_fraction <= 1.0:
+            raise ValueError(
+                "rehearsal_fraction must be between 0 and 1."
+            )
+
+        if rehearsal_max < 0:
+            raise ValueError("rehearsal_max must be non-negative.")
+
+        self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        self.max_seq_len = max_seq_len
+
+        self.initial_max = float(initial_max)
+        self.current_max = float(initial_max)
+        self.growth_rate = growth_rate
+
+        self.beta_alpha = beta_alpha
+        self.beta_beta = beta_beta
+
+        self.rehearsal_fraction = rehearsal_fraction
+        self.rehearsal_max = rehearsal_max
+
+        self.pad_id = tokenizer.char_to_int["<pad>"]
+        self.eos_id = tokenizer.char_to_int["<eos>"]
+
+        self.step = 0
+        self.rng = random.Random(seed)
+
+    def next_batch(self) -> torch.Tensor:
+        rehearsal_count = round(
+            self.batch_size * self.rehearsal_fraction
+        )
+        curriculum_count = self.batch_size - rehearsal_count
+
+        samples: list[list[list[int]]] = []
+
+        for _ in range(curriculum_count):
+            a = self._sample_curriculum_integer()
+            b = self._sample_curriculum_integer()
+            samples.append(self._encode_sample(a, b))
+
+        for _ in range(rehearsal_count):
+            a = self.rng.randint(0, self.rehearsal_max)
+            b = self.rng.randint(0, self.rehearsal_max)
+            samples.append(self._encode_sample(a, b))
+
+        self.rng.shuffle(samples)
+
+        batch = torch.tensor(samples, dtype=torch.long)
+
+        self.step += 1
+        self.current_max *= 1.0 + self.growth_rate
+
+        return batch
+
+    def _sample_curriculum_integer(self) -> int:
+        beta_sample = self.rng.betavariate(
+            self.beta_alpha,
+            self.beta_beta,
+        )
+
+        return int(beta_sample * self.current_max)
+
+    def _encode_sample(
+        self,
+        a: int,
+        b: int,
+    ) -> list[list[int]]:
+        target = a * b
+
+        a_tokens = self.tokenizer.encode(str(a))
+        b_tokens = self.tokenizer.encode(str(b))
+        target_tokens = self.tokenizer.encode(str(target))
+
+        a_tokens.reverse()
+        b_tokens.reverse()
+        target_tokens.reverse()
+
+        target_tokens.append(self.eos_id)
+
+        self._check_sequence_length(
+            name="a",
+            value=a,
+            token_ids=a_tokens,
+        )
+        self._check_sequence_length(
+            name="b",
+            value=b,
+            token_ids=b_tokens,
+        )
+        self._check_sequence_length(
+            name="target",
+            value=target,
+            token_ids=target_tokens,
+        )
+
+        return [
+            self._pad(a_tokens),
+            self._pad(b_tokens),
+            self._pad(target_tokens),
+        ]
+
+    def _check_sequence_length(
+        self,
+        name: str,
+        value: int,
+        token_ids: list[int],
+    ) -> None:
+        if len(token_ids) > self.max_seq_len:
+            raise ValueError(
+                f"{name}={value} requires {len(token_ids)} tokens, "
+                f"but max_seq_len is {self.max_seq_len}."
+            )
+
+    def _pad(self, token_ids: list[int]) -> list[int]:
+        padding_length = self.max_seq_len - len(token_ids)
+
+        return token_ids + [self.pad_id] * padding_length
+
+    def state_dict(self) -> dict:
+        return {
+            "step": self.step,
+            "current_max": self.current_max,
+            "random_state": self.rng.getstate(),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.step = state["step"]
+        self.current_max = state["current_max"]
+        self.rng.setstate(state["random_state"])
+
+    def reset(self) -> None:
+        self.step = 0
+        self.current_max = self.initial_max
