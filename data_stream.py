@@ -1,5 +1,8 @@
 import random
+
 import torch
+from torch.utils.data import DataLoader
+
 from tokenizer import DigitTokenizer
 
 
@@ -29,8 +32,11 @@ class MultiplicationDataStream:
         if growth_rate < 0:
             raise ValueError("growth_rate must be non-negative.")
 
-        if beta_alpha <= 0 or beta_beta <= 0:
-            raise ValueError("Beta distribution parameters must be positive.")
+        if beta_alpha <= 0:
+            raise ValueError("beta_alpha must be greater than 0.")
+
+        if beta_beta <= 0:
+            raise ValueError("beta_beta must be greater than 0.")
 
         if not 0.0 <= rehearsal_fraction <= 1.0:
             raise ValueError(
@@ -46,19 +52,20 @@ class MultiplicationDataStream:
 
         self.initial_max = float(initial_max)
         self.current_max = float(initial_max)
-        self.growth_rate = growth_rate
+        self.growth_rate = float(growth_rate)
 
-        self.beta_alpha = beta_alpha
-        self.beta_beta = beta_beta
+        self.beta_alpha = float(beta_alpha)
+        self.beta_beta = float(beta_beta)
 
-        self.rehearsal_fraction = rehearsal_fraction
+        self.rehearsal_fraction = float(rehearsal_fraction)
         self.rehearsal_max = rehearsal_max
 
         self.pad_id = tokenizer.char_to_int["<pad>"]
         self.eos_id = tokenizer.char_to_int["<eos>"]
 
-        self.step = 0
+        self.seed = seed
         self.rng = random.Random(seed)
+        self.step = 0
 
     def next_batch(self) -> torch.Tensor:
         rehearsal_count = round(
@@ -71,21 +78,93 @@ class MultiplicationDataStream:
         for _ in range(curriculum_count):
             a = self._sample_curriculum_integer()
             b = self._sample_curriculum_integer()
-            samples.append(self._encode_sample(a, b))
+
+            samples.append(
+                self._encode_sample(a, b)
+            )
 
         for _ in range(rehearsal_count):
-            a = self.rng.randint(0, self.rehearsal_max)
-            b = self.rng.randint(0, self.rehearsal_max)
-            samples.append(self._encode_sample(a, b))
+            a = self.rng.randint(
+                0,
+                self.rehearsal_max,
+            )
+            b = self.rng.randint(
+                0,
+                self.rehearsal_max,
+            )
+
+            samples.append(
+                self._encode_sample(a, b)
+            )
 
         self.rng.shuffle(samples)
 
-        batch = torch.tensor(samples, dtype=torch.long)
+        batch = torch.tensor(
+            samples,
+            dtype=torch.long,
+        )
 
         self.step += 1
         self.current_max *= 1.0 + self.growth_rate
 
         return batch
+
+    def create_fixed_loader(
+        self,
+        num_samples: int,
+        max_value: int,
+        batch_size: int | None = None,
+        seed: int = 42,
+    ) -> DataLoader:
+        if num_samples <= 0:
+            raise ValueError(
+                "num_samples must be greater than 0."
+            )
+
+        if max_value < 0:
+            raise ValueError(
+                "max_value must be non-negative."
+            )
+
+        loader_batch_size = (
+            self.batch_size
+            if batch_size is None
+            else batch_size
+        )
+
+        if loader_batch_size <= 0:
+            raise ValueError(
+                "batch_size must be greater than 0."
+            )
+
+        evaluation_rng = random.Random(seed)
+        samples: list[list[list[int]]] = []
+
+        for _ in range(num_samples):
+            a = evaluation_rng.randint(
+                0,
+                max_value,
+            )
+            b = evaluation_rng.randint(
+                0,
+                max_value,
+            )
+
+            samples.append(
+                self._encode_sample(a, b)
+            )
+
+        dataset = torch.tensor(
+            samples,
+            dtype=torch.long,
+        )
+
+        return DataLoader(
+            dataset,
+            batch_size=loader_batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
 
     def _sample_curriculum_integer(self) -> int:
         beta_sample = self.rng.betavariate(
@@ -93,7 +172,9 @@ class MultiplicationDataStream:
             self.beta_beta,
         )
 
-        return int(beta_sample * self.current_max)
+        return int(
+            beta_sample * self.current_max
+        )
 
     def _encode_sample(
         self,
@@ -104,7 +185,9 @@ class MultiplicationDataStream:
 
         a_tokens = self.tokenizer.encode(str(a))
         b_tokens = self.tokenizer.encode(str(b))
-        target_tokens = self.tokenizer.encode(str(target))
+        target_tokens = self.tokenizer.encode(
+            str(target)
+        )
 
         a_tokens.reverse()
         b_tokens.reverse()
@@ -117,11 +200,13 @@ class MultiplicationDataStream:
             value=a,
             token_ids=a_tokens,
         )
+
         self._check_sequence_length(
             name="b",
             value=b,
             token_ids=b_tokens,
         )
+
         self._check_sequence_length(
             name="target",
             value=target,
@@ -142,14 +227,23 @@ class MultiplicationDataStream:
     ) -> None:
         if len(token_ids) > self.max_seq_len:
             raise ValueError(
-                f"{name}={value} requires {len(token_ids)} tokens, "
-                f"but max_seq_len is {self.max_seq_len}."
+                f"{name}={value} requires "
+                f"{len(token_ids)} tokens, but "
+                f"max_seq_len is {self.max_seq_len}."
             )
 
-    def _pad(self, token_ids: list[int]) -> list[int]:
-        padding_length = self.max_seq_len - len(token_ids)
+    def _pad(
+        self,
+        token_ids: list[int],
+    ) -> list[int]:
+        padding_length = (
+            self.max_seq_len - len(token_ids)
+        )
 
-        return token_ids + [self.pad_id] * padding_length
+        return (
+            token_ids
+            + [self.pad_id] * padding_length
+        )
 
     def state_dict(self) -> dict:
         return {
@@ -158,40 +252,33 @@ class MultiplicationDataStream:
             "random_state": self.rng.getstate(),
         }
 
-    def load_state_dict(self, state: dict) -> None:
-        self.step = state["step"]
-        self.current_max = state["current_max"]
-        self.rng.setstate(state["random_state"])
+    def load_state_dict(
+        self,
+        state: dict,
+    ) -> None:
+        required_keys = {
+            "step",
+            "current_max",
+            "random_state",
+        }
+
+        missing_keys = required_keys - state.keys()
+
+        if missing_keys:
+            raise KeyError(
+                "Missing data-stream state keys: "
+                f"{sorted(missing_keys)}"
+            )
+
+        self.step = int(state["step"])
+        self.current_max = float(
+            state["current_max"]
+        )
+        self.rng.setstate(
+            state["random_state"]
+        )
 
     def reset(self) -> None:
         self.step = 0
         self.current_max = self.initial_max
-        
-    def create_fixed_loader(
-        self,
-        num_samples: int,
-        max_value: int,
-        batch_size: int | None = None,
-        seed: int = 42,
-    ) -> torch.utils.data.DataLoader:
-        if num_samples <= 0:
-            raise ValueError("num_samples must be greater than 0.")
-
-        if max_value < 0:
-            raise ValueError("max_value must be non-negative.")
-
-        evaluation_rng = random.Random(seed)
-        samples: list[list[list[int]]] = []
-
-        for _ in range(num_samples):
-            a = evaluation_rng.randint(0, max_value)
-            b = evaluation_rng.randint(0, max_value)
-            samples.append(self._encode_sample(a, b))
-
-        dataset = torch.tensor(samples, dtype=torch.long)
-
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size or self.batch_size,
-            shuffle=False,
-        )
+        self.rng = random.Random(self.seed)
