@@ -166,3 +166,32 @@ class MultiplicationDataStream:
     def reset(self) -> None:
         self.step = 0
         self.current_max = self.initial_max
+        
+    def create_fixed_loader(
+        self,
+        num_samples: int,
+        max_value: int,
+        batch_size: int | None = None,
+        seed: int = 42,
+    ) -> torch.utils.data.DataLoader:
+        if num_samples <= 0:
+            raise ValueError("num_samples must be greater than 0.")
+
+        if max_value < 0:
+            raise ValueError("max_value must be non-negative.")
+
+        evaluation_rng = random.Random(seed)
+        samples: list[list[list[int]]] = []
+
+        for _ in range(num_samples):
+            a = evaluation_rng.randint(0, max_value)
+            b = evaluation_rng.randint(0, max_value)
+            samples.append(self._encode_sample(a, b))
+
+        dataset = torch.tensor(samples, dtype=torch.long)
+
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size or self.batch_size,
+            shuffle=False,
+        )

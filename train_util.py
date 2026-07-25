@@ -1,11 +1,12 @@
 import os
 from pathlib import Path
 
-import torch
-from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
+import torch
 from IPython.display import clear_output, display
+from matplotlib.ticker import MaxNLocator
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 
 class Trainer:
@@ -15,154 +16,152 @@ class Trainer:
         val_loss_history: list[float] | None = None,
         train_accuracy_history: list[float] | None = None,
         val_accuracy_history: list[float] | None = None,
-        checkpoint_dir: str | os.PathLike = "/teamspace/studios/this_studio/SAIR-competition-modular-math/checkpoints",
+        metric_step_history: list[int] | None = None,
+        checkpoint_dir: str | os.PathLike = (
+            "/teamspace/studios/this_studio/"
+            "SAIR-competition-modular-math/checkpoints"
+        ),
         device: str | torch.device | None = None,
     ):
-        self.train_loss_history = train_loss_history if train_loss_history is not None else []
-        self.val_loss_history = val_loss_history if val_loss_history is not None else []
-        self.train_accuracy_history = train_accuracy_history if train_accuracy_history is not None else []
-        self.val_accuracy_history = val_accuracy_history if val_accuracy_history is not None else []
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    
-    @staticmethod
-    def dataset_tensor_to_loader(
-        dataset_tensor: torch.Tensor,
-        train_percent: float = 0.8,
-        val_percent: float = 0.1,
-        batch_size: int = 64,
-        rand_seed: int = 42,
-    ):
-        total_rows = dataset_tensor.size(0)
-
-        if total_rows < 3:
-            raise ValueError("dataset_tensor must contain at least 3 rows to create train, val, and test splits.")
-
-        if train_percent < 0 or val_percent < 0:
-            raise ValueError("train_percent and val_percent must be non-negative.")
-
-        if train_percent + val_percent >= 1:
-            raise ValueError("train_percent + val_percent must be less than 1 so test split is non-empty.")
-
-        train_size = int(train_percent * total_rows)
-        val_size = int(val_percent * total_rows)
-        test_size = total_rows - train_size - val_size
-
-        if train_size <= 0:
-            raise ValueError("train split is empty. Increase train_percent or use a larger dataset.")
-
-        if val_size <= 0:
-            raise ValueError("validation split is empty. Increase val_percent or use a larger dataset.")
-
-        if test_size <= 0:
-            raise ValueError("test split is empty. Make train_percent + val_percent smaller.")
-
-        train_subset, val_subset, test_subset = random_split(
-            dataset_tensor,
-            [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(rand_seed),
+        self.train_loss_history = (
+            train_loss_history if train_loss_history is not None else []
+        )
+        self.val_loss_history = (
+            val_loss_history if val_loss_history is not None else []
+        )
+        self.train_accuracy_history = (
+            train_accuracy_history
+            if train_accuracy_history is not None
+            else []
+        )
+        self.val_accuracy_history = (
+            val_accuracy_history
+            if val_accuracy_history is not None
+            else []
+        )
+        self.metric_step_history = (
+            metric_step_history if metric_step_history is not None else []
         )
 
-        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, drop_last=True)
-        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
-        test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False)
+        self.global_step = 0
+        self.checkpoint_dir = Path(checkpoint_dir)
 
-        return train_loader, val_loader, test_loader
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+        )
 
-    
-    def add_loss_and_accuracy(self, train_loss: float, val_loss: float, train_accuracy: float, val_accuracy: float):
+    def add_loss_and_accuracy(
+        self,
+        step: int,
+        train_loss: float,
+        val_loss: float,
+        train_accuracy: float,
+        val_accuracy: float,
+    ):
+        self.metric_step_history.append(int(step))
         self.train_loss_history.append(float(train_loss))
         self.val_loss_history.append(float(val_loss))
         self.train_accuracy_history.append(float(train_accuracy))
         self.val_accuracy_history.append(float(val_accuracy))
 
-    
-    def plot_live_loss(self, current_epoch: int, total_target_epochs: int):
-        if len(self.train_loss_history) == 0 or len(self.val_loss_history) == 0:
-            raise ValueError("No loss history to plot yet.")
-    
-        if len(self.train_loss_history) != len(self.val_loss_history):
-            raise ValueError("Loss histories must have the same length.")
-    
-        if len(self.train_accuracy_history) != len(self.val_accuracy_history):
-            raise ValueError("Accuracy histories must have the same length.")
-    
+    def plot_live_loss(self, target_step: int):
+        if not self.metric_step_history:
+            raise ValueError("No metric history to plot yet.")
+
+        history_lengths = {
+            len(self.metric_step_history),
+            len(self.train_loss_history),
+            len(self.val_loss_history),
+            len(self.train_accuracy_history),
+            len(self.val_accuracy_history),
+        }
+
+        if len(history_lengths) != 1:
+            raise ValueError(
+                "All metric histories must have the same length."
+            )
+
         clear_output(wait=True)
-    
+
         fig, ax1 = plt.subplots(figsize=(14, 8))
-    
-        epochs_range = list(range(1, len(self.train_loss_history) + 1))
-    
-        # Loss axis
+
         ax1.plot(
-            epochs_range,
+            self.metric_step_history,
             self.train_loss_history,
             label="Training Loss",
             linewidth=2,
             marker=".",
-            markersize=4
+            markersize=4,
         )
-    
+
         ax1.plot(
-            epochs_range,
+            self.metric_step_history,
             self.val_loss_history,
             label="Validation Loss",
             linewidth=2,
             marker=".",
-            markersize=4
+            markersize=4,
         )
-    
-        ax1.set_xlabel("Epochs", fontsize=12)
+
+        ax1.set_xlabel("Training Step", fontsize=12)
         ax1.set_ylabel("Cross-Entropy Loss", fontsize=12)
-    
-        # Accuracy axis
+        ax1.xaxis.set_major_locator(
+            MaxNLocator(nbins=20, integer=True)
+        )
+
         ax2 = ax1.twinx()
-    
+
         ax2.plot(
-            epochs_range,
+            self.metric_step_history,
             self.train_accuracy_history,
             label="Training Accuracy",
             linestyle="--",
             linewidth=2,
-            marker="."
+            marker=".",
+            markersize=4,
         )
-    
+
         ax2.plot(
-            epochs_range,
+            self.metric_step_history,
             self.val_accuracy_history,
             label="Validation Accuracy",
             linestyle="--",
             linewidth=2,
-            marker="."
+            marker=".",
+            markersize=4,
         )
-    
+
         ax2.set_ylabel("Accuracy", fontsize=12)
         ax2.set_ylim(0, 1)
-    
-        ax1.set_title(
-            "Live Training Loss and Accuracy",
-            fontsize=14,
-            fontweight="bold"
-        )
-    
-        # Combine legends from both axes
+
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
+
         ax1.legend(
             lines1 + lines2,
             labels1 + labels2,
-            fontsize=11
+            fontsize=11,
         )
-    
+
+        ax1.set_title(
+            "Training Loss and Accuracy",
+            fontsize=14,
+            fontweight="bold",
+        )
+
         ax1.grid(True, linestyle="--", alpha=0.6)
-    
+
         plt.tight_layout()
         display(fig)
         plt.close(fig)
-    
+
         print(
-            f"Latest Stats -> Epoch {current_epoch:02d}/{total_target_epochs:02d} | "
+            f"Latest Stats -> "
+            f"Step {self.global_step:,}/{target_step:,} | "
             f"Train Loss: {self.train_loss_history[-1]:.4f} | "
             f"Val Loss: {self.val_loss_history[-1]:.4f} | "
             f"Train Acc: {self.train_accuracy_history[-1]:.4f} | "
@@ -174,14 +173,19 @@ class Trainer:
         test_loss_history: list[float],
         test_accuracy_history: list[float],
     ):
-        batch_numbers = list(range(10, len(test_loss_history) + 1, 10))
+        batch_numbers = list(
+            range(10, len(test_loss_history) + 1, 10)
+        )
         plotted_losses = test_loss_history[9::10]
         plotted_accuracies = test_accuracy_history[9::10]
-    
+
+        if not plotted_losses:
+            return
+
         clear_output(wait=True)
-    
+
         fig, ax1 = plt.subplots(figsize=(14, 8))
-    
+
         ax1.plot(
             batch_numbers,
             plotted_losses,
@@ -189,12 +193,19 @@ class Trainer:
             linewidth=2,
             marker=".",
         )
+
         ax1.set_xlabel("Batch", fontsize=12)
         ax1.set_ylabel("Cross-Entropy Loss", fontsize=12)
-        ax1.set_ylim(0.0, max(max(plotted_losses), 1.0))
-    
+        ax1.set_ylim(
+            0.0,
+            max(max(plotted_losses), 1.0),
+        )
+        ax1.xaxis.set_major_locator(
+            MaxNLocator(nbins=20, integer=True)
+        )
+
         ax2 = ax1.twinx()
-    
+
         ax2.plot(
             batch_numbers,
             plotted_accuracies,
@@ -204,20 +215,83 @@ class Trainer:
             linewidth=2,
             marker=".",
         )
+
         ax2.set_ylabel("Accuracy", fontsize=12)
         ax2.set_ylim(0, 1)
-    
+
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2)
-    
-        ax1.set_title("Test Loss and Accuracy", fontsize=14, fontweight="bold")
+
+        ax1.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+        )
+
+        ax1.set_title(
+            "Test Loss and Accuracy",
+            fontsize=14,
+            fontweight="bold",
+        )
+
         ax1.grid(True, linestyle="--", alpha=0.6)
-    
+
         plt.tight_layout()
         display(fig)
         plt.close(fig)
 
+    def evaluate(
+        self,
+        model: torch.nn.Module,
+        data_loader: DataLoader,
+        loss_fct,
+        vocab_size: int,
+        max_seq_len: int,
+        pad_id: int,
+        description: str = "Validation",
+    ) -> tuple[float, float]:
+        if len(data_loader) == 0:
+            raise ValueError("data_loader must contain at least one batch.")
+
+        total_loss = 0.0
+        total_accuracy = 0.0
+
+        model.eval()
+
+        with torch.no_grad():
+            for batch in tqdm(
+                data_loader,
+                desc=description,
+                leave=False,
+            ):
+                batch = batch.to(self.device)
+                a, b, tgt = batch.unbind(dim=1)
+
+                logits = model(a, b, tgt)
+
+                loss = loss_fct(
+                    logits.reshape(-1, vocab_size),
+                    tgt.reshape(-1),
+                )
+
+                predictions = model.predict(
+                    a,
+                    b,
+                    max_new_tokens=max_seq_len,
+                )
+
+                accuracy = self.compute_accuracy_from_predictions(
+                    predictions,
+                    tgt,
+                    pad_id,
+                )
+
+                total_loss += loss.item()
+                total_accuracy += accuracy.item()
+
+        average_loss = total_loss / len(data_loader)
+        average_accuracy = total_accuracy / len(data_loader)
+
+        return average_loss, average_accuracy
 
     def test(
         self,
@@ -226,124 +300,251 @@ class Trainer:
         loss_fct,
         vocab_size: int,
         max_seq_len: int,
-        pad_id: int
-    ):
+        pad_id: int,
+    ) -> tuple[float, float]:
+        if len(test_loader) == 0:
+            raise ValueError(
+                "test_loader must contain at least one batch."
+            )
+
         test_loss_history: list[float] = []
         test_accuracy_history: list[float] = []
-    
+
         model.eval()
-    
+
         with torch.no_grad():
             for batch_index, batch in enumerate(
-                tqdm(test_loader, desc="Testing accuracy"),
+                tqdm(test_loader, desc="Testing"),
                 start=1,
             ):
                 batch = batch.to(self.device)
                 a, b, tgt = batch.unbind(dim=1)
-    
+
                 logits = model(a, b, tgt)
-    
+
                 test_loss = loss_fct(
                     logits.reshape(-1, vocab_size),
                     tgt.reshape(-1),
                 )
-    
+
                 predictions = model.predict(
                     a,
                     b,
                     max_new_tokens=max_seq_len,
                 )
-    
-                test_accuracy = self.compute_accuracy_from_predictions(
-                    predictions,
-                    tgt,
-                    pad_id
+
+                test_accuracy = (
+                    self.compute_accuracy_from_predictions(
+                        predictions,
+                        tgt,
+                        pad_id,
+                    )
                 )
-    
+
                 test_loss_history.append(test_loss.item())
-                test_accuracy_history.append(float(test_accuracy))
-    
+                test_accuracy_history.append(
+                    test_accuracy.item()
+                )
+
                 if batch_index % 10 == 0:
                     self.plot_test_loss(
                         test_loss_history,
                         test_accuracy_history,
                     )
-    
-        average_test_loss = sum(test_loss_history) / len(test_loss_history)
-        average_test_accuracy = (
-            sum(test_accuracy_history) / len(test_accuracy_history)
+
+        average_test_loss = (
+            sum(test_loss_history) / len(test_loss_history)
         )
-    
+        average_test_accuracy = (
+            sum(test_accuracy_history)
+            / len(test_accuracy_history)
+        )
+
         print(
             f"Test Loss: {average_test_loss:.4f} | "
             f"Test Accuracy: {average_test_accuracy:.4f}"
         )
-    
+
         return average_test_loss, average_test_accuracy
 
-    
     @staticmethod
-    def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor, pad_id: int):
-        batch_size, seq_len = targets.shape
+    def compute_accuracy(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        pad_id: int,
+    ) -> torch.Tensor:
         predictions = logits.argmax(dim=-1)
-        corrects = (predictions == targets) | (targets == pad_id)
-        accuracy = corrects.all(dim=-1)
-    
-        return accuracy.float().mean()
 
-    
+        corrects = (
+            (predictions == targets)
+            | (targets == pad_id)
+        )
+
+        exact_matches = corrects.all(dim=-1)
+
+        return exact_matches.float().mean()
+
     @staticmethod
-    def compute_accuracy_from_predictions(predictions: torch.Tensor, targets: torch.Tensor, pad_id: int):
-        corrects = (predictions == targets) | (targets == pad_id)
-        accuracy = corrects.all(dim=-1)
-        return accuracy.float().mean()
+    def compute_accuracy_from_predictions(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        pad_id: int,
+    ) -> torch.Tensor:
+        if predictions.shape != targets.shape:
+            raise ValueError(
+                "predictions and targets must have the same shape. "
+                f"Received {predictions.shape} and {targets.shape}."
+            )
 
-        
-    def save_checkpoint(self, checkpoint_name: str, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None):
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        corrects = (
+            (predictions == targets)
+            | (targets == pad_id)
+        )
+
+        exact_matches = corrects.all(dim=-1)
+
+        return exact_matches.float().mean()
+
+    def save_checkpoint(
+        self,
+        checkpoint_name: str,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler=None,
+        data_stream=None,
+    ):
+        self.checkpoint_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         if not checkpoint_name.endswith(".pt"):
             checkpoint_name += ".pt"
 
-        checkpoint_path = self.checkpoint_dir / checkpoint_name
+        checkpoint_path = (
+            self.checkpoint_dir / checkpoint_name
+        )
 
         checkpoint_state = {
-            'model_state_dict': model.state_dict(),
-            'train_loss_history': self.train_loss_history,
-            'val_loss_history': self.val_loss_history,
-            'train_accuracy_history': self.train_accuracy_history,
-            'val_accuracy_history': self.val_accuracy_history,
-            'epochs_completed': len(self.train_loss_history),
+            "model_state_dict": model.state_dict(),
+            "global_step": self.global_step,
+            "metric_step_history": self.metric_step_history,
+            "train_loss_history": self.train_loss_history,
+            "val_loss_history": self.val_loss_history,
+            "train_accuracy_history": (
+                self.train_accuracy_history
+            ),
+            "val_accuracy_history": (
+                self.val_accuracy_history
+            ),
         }
 
         if optimizer is not None:
-            checkpoint_state['optimizer_state_dict'] = optimizer.state_dict()
+            checkpoint_state["optimizer_state_dict"] = (
+                optimizer.state_dict()
+            )
 
-        torch.save(checkpoint_state, checkpoint_path)
-        print(f"Checkpoint manually saved as: {checkpoint_path}")
+        if scheduler is not None:
+            checkpoint_state["scheduler_state_dict"] = (
+                scheduler.state_dict()
+            )
 
-    
-    def load_checkpoint(self, checkpoint_name: str, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None):
+        if data_stream is not None:
+            checkpoint_state["data_stream_state_dict"] = (
+                data_stream.state_dict()
+            )
+
+        torch.save(
+            checkpoint_state,
+            checkpoint_path,
+        )
+
+        print(f"Checkpoint saved: {checkpoint_path}")
+
+    def load_checkpoint(
+        self,
+        checkpoint_name: str,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler=None,
+        data_stream=None,
+    ):
         if not checkpoint_name.endswith(".pt"):
             checkpoint_name += ".pt"
 
-        checkpoint_path = self.checkpoint_dir / checkpoint_name
+        checkpoint_path = (
+            self.checkpoint_dir / checkpoint_name
+        )
 
         if not checkpoint_path.exists():
-            raise FileNotFoundError(f"No checkpoint file found at {checkpoint_path}")
+            raise FileNotFoundError(
+                f"No checkpoint found at {checkpoint_path}"
+            )
 
-        print(f"📂 Loading checkpoint: {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=self.device,
+        )
 
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(
+            checkpoint["model_state_dict"]
+        )
 
-        if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if (
+            optimizer is not None
+            and "optimizer_state_dict" in checkpoint
+        ):
+            optimizer.load_state_dict(
+                checkpoint["optimizer_state_dict"]
+            )
 
-        self.train_loss_history = checkpoint.get('train_loss_history', [])
-        self.val_loss_history = checkpoint.get('val_loss_history', [])
-        self.train_accuracy_history = checkpoint.get('train_accuracy_history', [])
-        self.val_accuracy_history = checkpoint.get('val_accuracy_history', [])
+        if (
+            scheduler is not None
+            and "scheduler_state_dict" in checkpoint
+        ):
+            scheduler.load_state_dict(
+                checkpoint["scheduler_state_dict"]
+            )
 
-        print(f"Successfully restored state from {checkpoint_name} (Epochs completed: {checkpoint.get('epochs_completed', len(self.train_loss_history))})")
+        if (
+            data_stream is not None
+            and "data_stream_state_dict" in checkpoint
+        ):
+            data_stream.load_state_dict(
+                checkpoint["data_stream_state_dict"]
+            )
 
+        self.global_step = checkpoint.get(
+            "global_step",
+            0,
+        )
+
+        self.metric_step_history = checkpoint.get(
+            "metric_step_history",
+            [],
+        )
+
+        self.train_loss_history = checkpoint.get(
+            "train_loss_history",
+            [],
+        )
+
+        self.val_loss_history = checkpoint.get(
+            "val_loss_history",
+            [],
+        )
+
+        self.train_accuracy_history = checkpoint.get(
+            "train_accuracy_history",
+            [],
+        )
+
+        self.val_accuracy_history = checkpoint.get(
+            "val_accuracy_history",
+            [],
+        )
+
+        print(
+            f"Checkpoint loaded: {checkpoint_path} | "
+            f"Global step: {self.global_step:,}"
+        )
