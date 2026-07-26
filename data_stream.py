@@ -2,6 +2,7 @@ import random
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from tokenizer import DigitTokenizer
 
@@ -284,18 +285,18 @@ class MultiplicationDataStream:
     ) -> DataLoader:
         if num_steps <= 0:
             raise ValueError("num_steps must be greater than 0.")
-
+    
         max_token_id = max(self.tokenizer.char_to_int.values())
-
+    
         if max_token_id <= 255:
             storage_dtype = torch.uint8
         elif max_token_id <= 32767:
             storage_dtype = torch.int16
         else:
             storage_dtype = torch.int32
-
+    
         total_samples = num_steps * self.batch_size
-
+    
         dataset = torch.empty(
             (
                 total_samples,
@@ -304,15 +305,18 @@ class MultiplicationDataStream:
             ),
             dtype=storage_dtype,
         )
-
-        for chunk_step in range(num_steps):
+    
+        for chunk_step in tqdm(
+            range(num_steps),
+            desc=f"Generating {num_steps:,} training batches",
+        ):
             start_index = chunk_step * self.batch_size
             end_index = start_index + self.batch_size
-
+    
             dataset[start_index:end_index] = (
                 self.next_batch().to(storage_dtype)
             )
-
+    
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
