@@ -72,10 +72,10 @@ class Trainer:
     def plot_live_loss(self, target_step: int) -> None:
         if not self.metric_step_history:
             return
-    
+
         fig, loss_axis = plt.subplots(figsize=(14, 8))
         accuracy_axis = loss_axis.twinx()
-    
+
         loss_axis.plot(
             self.metric_step_history,
             self.train_loss_history,
@@ -84,7 +84,7 @@ class Trainer:
             marker=".",
             markersize=4,
         )
-    
+
         loss_axis.plot(
             self.metric_step_history,
             self.val_loss_history,
@@ -93,7 +93,7 @@ class Trainer:
             marker=".",
             markersize=4,
         )
-    
+
         accuracy_axis.plot(
             self.metric_step_history,
             self.train_accuracy_history,
@@ -101,7 +101,7 @@ class Trainer:
             linewidth=2,
             linestyle="--",
         )
-    
+
         accuracy_axis.plot(
             self.metric_step_history,
             self.val_accuracy_history,
@@ -109,34 +109,34 @@ class Trainer:
             linewidth=2,
             linestyle="--",
         )
-    
+
         loss_axis.set_title("Training and Validation Metrics")
         loss_axis.set_xlabel("Training step")
         loss_axis.set_ylabel("Cross-entropy loss")
         accuracy_axis.set_ylabel("Exact-match accuracy")
-    
+
         loss_axis.set_xlim(
             left=0,
-            right=max(target_step, self.metric_step_history[-1]),
+            right=max(1, self.metric_step_history[-1]),
         )
-    
+
         loss_axis.xaxis.set_major_locator(
             MaxNLocator(nbins=20, integer=True)
         )
-    
+
         loss_lines, loss_labels = loss_axis.get_legend_handles_labels()
         accuracy_lines, accuracy_labels = (
             accuracy_axis.get_legend_handles_labels()
         )
-    
+
         loss_axis.legend(
             loss_lines + accuracy_lines,
             loss_labels + accuracy_labels,
             loc="best",
         )
-    
+
         fig.tight_layout()
-    
+
         if self.live_plot_display is None:
             self.live_plot_display = display(
                 fig,
@@ -144,7 +144,7 @@ class Trainer:
             )
         else:
             self.live_plot_display.update(fig)
-    
+
         plt.close(fig)
 
     @staticmethod
@@ -160,8 +160,6 @@ class Trainer:
 
         if not plotted_losses:
             return
-
-        clear_output(wait=True)
 
         fig, ax1 = plt.subplots(figsize=(14, 8))
 

@@ -23,7 +23,6 @@ class MultiplicationDataStream:
     ):
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0.")
-
         if max_seq_len <= 0:
             raise ValueError("max_seq_len must be greater than 0.")
 
@@ -38,7 +37,6 @@ class MultiplicationDataStream:
 
         if beta_beta <= 0:
             raise ValueError("beta_beta must be greater than 0.")
-
         if not 0.0 <= rehearsal_fraction <= 1.0:
             raise ValueError(
                 "rehearsal_fraction must be between 0 and 1."
@@ -54,7 +52,6 @@ class MultiplicationDataStream:
         self.initial_max = float(initial_max)
         self.current_max = float(initial_max)
         self.growth_rate = float(growth_rate)
-
         self.beta_alpha = float(beta_alpha)
         self.beta_beta = float(beta_beta)
 
@@ -119,35 +116,35 @@ class MultiplicationDataStream:
     ) -> DataLoader:
         if num_steps <= 0:
             raise ValueError("num_steps must be greater than 0.")
-    
+
         if lookahead_steps < 0:
             raise ValueError("lookahead_steps must be non-negative.")
-    
+
         validation_batch_size = (
             self.batch_size
             if batch_size is None
             else batch_size
         )
-    
+
         if validation_batch_size <= 0:
             raise ValueError("batch_size must be greater than 0.")
-    
+
         validation_rng = random.Random(seed)
-    
+
         validation_max = self.current_max * (
             (1.0 + self.growth_rate) ** lookahead_steps
         )
-    
+
         rehearsal_count = round(
             validation_batch_size * self.rehearsal_fraction
         )
-    
+
         curriculum_count = (
             validation_batch_size - rehearsal_count
         )
-    
+
         total_samples = num_steps * validation_batch_size
-    
+
         dataset = torch.empty(
             (
                 total_samples,
@@ -156,10 +153,10 @@ class MultiplicationDataStream:
             ),
             dtype=torch.long,
         )
-    
+
         for validation_step in range(num_steps):
             samples: list[list[list[int]]] = []
-    
+
             for _ in range(curriculum_count):
                 a = int(
                     validation_rng.betavariate(
@@ -168,7 +165,7 @@ class MultiplicationDataStream:
                     )
                     * validation_max
                 )
-    
+
                 b = int(
                     validation_rng.betavariate(
                         self.beta_alpha,
@@ -176,43 +173,43 @@ class MultiplicationDataStream:
                     )
                     * validation_max
                 )
-    
+
                 samples.append(
                     self._encode_sample(a, b)
                 )
-    
+
             for _ in range(rehearsal_count):
                 a = validation_rng.randint(
                     0,
                     self.rehearsal_max,
                 )
-    
+
                 b = validation_rng.randint(
                     0,
                     self.rehearsal_max,
                 )
-    
+
                 samples.append(
                     self._encode_sample(a, b)
                 )
-    
+
             validation_rng.shuffle(samples)
-    
+
             start_index = (
                 validation_step * validation_batch_size
             )
-    
+
             end_index = (
                 start_index + validation_batch_size
             )
-    
+
             dataset[start_index:end_index] = torch.tensor(
                 samples,
                 dtype=torch.long,
             )
-    
+
             validation_max *= 1.0 + self.growth_rate
-    
+
         return DataLoader(
             dataset,
             batch_size=validation_batch_size,
@@ -277,7 +274,7 @@ class MultiplicationDataStream:
             shuffle=False,
             drop_last=False,
         )
-    
+
     def create_training_chunk_loader(
         self,
         num_steps: int,
@@ -285,18 +282,18 @@ class MultiplicationDataStream:
     ) -> DataLoader:
         if num_steps <= 0:
             raise ValueError("num_steps must be greater than 0.")
-    
+
         max_token_id = max(self.tokenizer.char_to_int.values())
-    
+
         if max_token_id <= 255:
             storage_dtype = torch.uint8
         elif max_token_id <= 32767:
             storage_dtype = torch.int16
         else:
             storage_dtype = torch.int32
-    
+
         total_samples = num_steps * self.batch_size
-    
+
         dataset = torch.empty(
             (
                 total_samples,
@@ -305,18 +302,24 @@ class MultiplicationDataStream:
             ),
             dtype=storage_dtype,
         )
-    
+
+        original_step = self.step
+        original_current_max = self.current_max
+
         for chunk_step in tqdm(
             range(num_steps),
             desc=f"Generating {num_steps:,} training batches",
         ):
             start_index = chunk_step * self.batch_size
             end_index = start_index + self.batch_size
-    
+
             dataset[start_index:end_index] = (
                 self.next_batch().to(storage_dtype)
             )
-    
+
+        self.step = original_step
+        self.current_max = original_current_max
+
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
