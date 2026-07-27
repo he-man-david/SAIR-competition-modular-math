@@ -42,8 +42,8 @@ class MultiplicationDataStream:
                 "rehearsal_fraction must be between 0 and 1."
             )
 
-        if rehearsal_max < 0:
-            raise ValueError("rehearsal_max must be non-negative.")
+        if rehearsal_max <= 0:
+            raise ValueError("rehearsal_max must be greater than 0.")
 
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -76,9 +76,13 @@ class MultiplicationDataStream:
         for _ in range(curriculum_count):
             a = self._sample_curriculum_integer()
             b = self._sample_curriculum_integer()
+            p = self.rng.randint(
+                2,
+                max(2, int(self.current_max)),
+            )
 
             samples.append(
-                self._encode_sample(a, b)
+                self._encode_sample(a, b, p)
             )
 
         for _ in range(rehearsal_count):
@@ -90,9 +94,13 @@ class MultiplicationDataStream:
                 0,
                 self.rehearsal_max,
             )
+            p = self.rng.randint(
+                2,
+                self.rehearsal_max,
+            )
 
             samples.append(
-                self._encode_sample(a, b)
+                self._encode_sample(a, b, p)
             )
 
         self.rng.shuffle(samples)
@@ -148,7 +156,7 @@ class MultiplicationDataStream:
         dataset = torch.empty(
             (
                 total_samples,
-                3,
+                4,
                 self.max_seq_len,
             ),
             dtype=torch.long,
@@ -174,8 +182,13 @@ class MultiplicationDataStream:
                     * validation_max
                 )
 
+                p = validation_rng.randint(
+                    1,
+                    max(1, int(validation_max)),
+                )
+
                 samples.append(
-                    self._encode_sample(a, b)
+                    self._encode_sample(a, b, p)
                 )
 
             for _ in range(rehearsal_count):
@@ -189,8 +202,13 @@ class MultiplicationDataStream:
                     self.rehearsal_max,
                 )
 
+                p = validation_rng.randint(
+                    1,
+                    self.rehearsal_max,
+                )
+
                 samples.append(
-                    self._encode_sample(a, b)
+                    self._encode_sample(a, b, p)
                 )
 
             validation_rng.shuffle(samples)
@@ -230,9 +248,9 @@ class MultiplicationDataStream:
                 "num_samples must be greater than 0."
             )
 
-        if max_value < 0:
+        if max_value <= 0:
             raise ValueError(
-                "max_value must be non-negative."
+                "max_value must be greater than 0."
             )
 
         loader_batch_size = (
@@ -258,9 +276,13 @@ class MultiplicationDataStream:
                 0,
                 max_value,
             )
+            p = evaluation_rng.randint(
+                1,
+                max_value,
+            )
 
             samples.append(
-                self._encode_sample(a, b)
+                self._encode_sample(a, b, p)
             )
 
         dataset = torch.tensor(
@@ -297,7 +319,7 @@ class MultiplicationDataStream:
         dataset = torch.empty(
             (
                 total_samples,
-                3,
+                4,
                 self.max_seq_len,
             ),
             dtype=storage_dtype,
@@ -342,17 +364,20 @@ class MultiplicationDataStream:
         self,
         a: int,
         b: int,
+        p: int,
     ) -> list[list[int]]:
-        target = a * b
+        target = (a * b) % p
 
         a_tokens = self.tokenizer.encode(str(a))
         b_tokens = self.tokenizer.encode(str(b))
+        p_tokens = self.tokenizer.encode(str(p))
         target_tokens = self.tokenizer.encode(
             str(target)
         )
 
         a_tokens.reverse()
         b_tokens.reverse()
+        p_tokens.reverse()
         target_tokens.reverse()
 
         target_tokens.append(self.eos_id)
@@ -370,6 +395,12 @@ class MultiplicationDataStream:
         )
 
         self._check_sequence_length(
+            name="p",
+            value=p,
+            token_ids=p_tokens,
+        )
+
+        self._check_sequence_length(
             name="target",
             value=target,
             token_ids=target_tokens,
@@ -378,6 +409,7 @@ class MultiplicationDataStream:
         return [
             self._pad(a_tokens),
             self._pad(b_tokens),
+            self._pad(p_tokens),
             self._pad(target_tokens),
         ]
 
