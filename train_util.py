@@ -44,6 +44,7 @@ class Trainer:
         )
 
         self.live_plot_display = None
+        self.test_plot_display = None
         self.global_step = 0
         self.checkpoint_dir = Path(checkpoint_dir)
 
@@ -147,8 +148,8 @@ class Trainer:
 
         plt.close(fig)
 
-    @staticmethod
     def plot_test_loss(
+        self,
         test_loss_history: list[float],
         test_accuracy_history: list[float],
     ):
@@ -213,7 +214,15 @@ class Trainer:
         ax1.grid(True, linestyle="--", alpha=0.6)
 
         plt.tight_layout()
-        display(fig)
+
+        if self.test_plot_display is None:
+            self.test_plot_display = display(
+                fig,
+                display_id=True,
+            )
+        else:
+            self.test_plot_display.update(fig)
+
         plt.close(fig)
 
     def evaluate(
@@ -240,10 +249,16 @@ class Trainer:
                 desc=description,
                 leave=False,
             ):
-                batch = batch.to(self.device)
-                a, b, tgt = batch.unbind(dim=1)
+                batch = batch.to(self.device).long()
 
-                logits = model(a, b, tgt)
+                a, b, p, tgt = batch.unbind(dim=1)
+
+                logits = model(
+                    a,
+                    b,
+                    p,
+                    tgt,
+                )
 
                 loss = loss_fct(
                     logits.reshape(-1, vocab_size),
@@ -253,6 +268,7 @@ class Trainer:
                 predictions = model.predict(
                     a,
                     b,
+                    p,
                     max_new_tokens=max_seq_len,
                 )
 
@@ -287,6 +303,8 @@ class Trainer:
         test_loss_history: list[float] = []
         test_accuracy_history: list[float] = []
 
+        self.test_plot_display = None
+
         model.eval()
 
         with torch.no_grad():
@@ -294,10 +312,16 @@ class Trainer:
                 tqdm(test_loader, desc="Testing"),
                 start=1,
             ):
-                batch = batch.to(self.device)
-                a, b, tgt = batch.unbind(dim=1)
+                batch = batch.to(self.device).long()
 
-                logits = model(a, b, tgt)
+                a, b, p, tgt = batch.unbind(dim=1)
+
+                logits = model(
+                    a,
+                    b,
+                    p,
+                    tgt,
+                )
 
                 test_loss = loss_fct(
                     logits.reshape(-1, vocab_size),
@@ -307,6 +331,7 @@ class Trainer:
                 predictions = model.predict(
                     a,
                     b,
+                    p,
                     max_new_tokens=max_seq_len,
                 )
 
@@ -318,7 +343,10 @@ class Trainer:
                     )
                 )
 
-                test_loss_history.append(test_loss.item())
+                test_loss_history.append(
+                    test_loss.item()
+                )
+
                 test_accuracy_history.append(
                     test_accuracy.item()
                 )
@@ -329,9 +357,16 @@ class Trainer:
                         test_accuracy_history,
                     )
 
+        if len(test_loss_history) % 10 != 0:
+            self.plot_test_loss(
+                test_loss_history,
+                test_accuracy_history,
+            )
+
         average_test_loss = (
             sum(test_loss_history) / len(test_loss_history)
         )
+
         average_test_accuracy = (
             sum(test_accuracy_history)
             / len(test_accuracy_history)
