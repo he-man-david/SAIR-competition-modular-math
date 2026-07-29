@@ -25,7 +25,11 @@ class BilinearTransformerNetwork(nn.Module):
         self.eq_id = eq_id
         self.eos_id = eos_id
 
-        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        self.pos_emb = nn.Embedding(
+            max_seq_len,
+            d_model,
+        )
+
         self.embedding = nn.Embedding(
             vocab_size,
             d_model,
@@ -34,22 +38,12 @@ class BilinearTransformerNetwork(nn.Module):
 
         self.bilinear_w = nn.ModuleDict(
             {
-                "a_mod_p": nn.Linear(
+                "a_b": nn.Linear(
                     d_model,
                     d_model,
                     bias=False,
                 ),
-                "b_mod_p": nn.Linear(
-                    d_model,
-                    d_model,
-                    bias=False,
-                ),
-                "a_mod_p_b_mod_p": nn.Linear(
-                    d_model,
-                    d_model,
-                    bias=False,
-                ),
-                "a_mod_p_b_mod_p_mod_p": nn.Linear(
+                "b_a": nn.Linear(
                     d_model,
                     d_model,
                     bias=False,
@@ -58,15 +52,21 @@ class BilinearTransformerNetwork(nn.Module):
         )
 
         self.interaction_proj = nn.Sequential(
-            nn.Linear(8 * d_model, 2 * d_model),
+            nn.Linear(
+                5 * d_model,
+                2 * d_model,
+            ),
             nn.SiLU(),
-            nn.Linear(2 * d_model, d_model),
+            nn.Linear(
+                2 * d_model,
+                d_model,
+            ),
         )
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=8 * d_model,
+            dim_feedforward=2 * d_model,
             dropout=dropout,
             activation="gelu",
             batch_first=True,
@@ -81,7 +81,7 @@ class BilinearTransformerNetwork(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=8 * d_model,
+            dim_feedforward=2 * d_model,
             dropout=dropout,
             activation="gelu",
             batch_first=True,
@@ -94,10 +94,16 @@ class BilinearTransformerNetwork(nn.Module):
         )
 
         self.output_head = nn.Sequential(
-            nn.Linear(d_model, vocab_size),
+            nn.Linear(
+                d_model,
+                vocab_size,
+            ),
         )
 
-    def add_pe(self, x: torch.Tensor):
+    def add_pe(
+        self,
+        x: torch.Tensor,
+    ):
         seq_len = x.size(1)
 
         if seq_len > self.max_seq_len:
@@ -158,7 +164,10 @@ class BilinearTransformerNetwork(nn.Module):
         )
 
         return torch.cat(
-            [start_tokens, tgt[:, :-1]],
+            [
+                start_tokens,
+                tgt[:, :-1],
+            ],
             dim=1,
         )
 
@@ -181,7 +190,9 @@ class BilinearTransformerNetwork(nn.Module):
 
         transformed_query = self.bilinear_w[
             bilinear_key
-        ](query_emb)
+        ](
+            query_emb
+        )
 
         bilinear_scores = torch.matmul(
             transformed_query,
@@ -229,67 +240,44 @@ class BilinearTransformerNetwork(nn.Module):
         emb_b = self.embedding(b)
         emb_p = self.embedding(p)
 
-        bilinear_context_a_mod_p = (
+        bilinear_context_ab = (
             self.create_bilinear_context(
-                "a_mod_p",
+                "a_b",
                 emb_a,
-                emb_p,
-                p,
-            )
-        )
-
-        bilinear_context_b_mod_p = (
-            self.create_bilinear_context(
-                "b_mod_p",
                 emb_b,
-                emb_p,
-                p,
-            )
-        )
-
-        bilinear_context_a_mod_p_b_mod_p = (
-            self.create_bilinear_context(
-                "a_mod_p_b_mod_p",
-                bilinear_context_a_mod_p,
-                bilinear_context_b_mod_p,
                 b,
             )
         )
 
-        bilinear_context_a_mod_p_b_mod_p_mod_p = (
+        bilinear_context_ba = (
             self.create_bilinear_context(
-                "a_mod_p_b_mod_p_mod_p",
-                bilinear_context_a_mod_p_b_mod_p,
-                emb_p,
-                p,
+                "b_a",
+                emb_b,
+                emb_a,
+                a,
             )
         )
-
-        emb_prod = emb_a * emb_b
 
         interaction = torch.cat(
             [
                 emb_a,
                 emb_b,
                 emb_p,
-                emb_prod,
-                bilinear_context_a_mod_p,
-                bilinear_context_b_mod_p,
-                bilinear_context_a_mod_p_b_mod_p,
-                bilinear_context_a_mod_p_b_mod_p_mod_p,
+                bilinear_context_ab,
+                bilinear_context_ba,
             ],
             dim=-1,
         )
 
-        x = self.interaction_proj(interaction)
+        x = self.interaction_proj(
+            interaction
+        )
 
         x = (
             x
-            + emb_prod
-            + bilinear_context_a_mod_p
-            + bilinear_context_b_mod_p
-            + bilinear_context_a_mod_p_b_mod_p
-            + bilinear_context_a_mod_p_b_mod_p_mod_p
+            + bilinear_context_ab
+            + bilinear_context_ba
+            + emb_p
         )
 
         x = x.masked_fill(
@@ -312,7 +300,9 @@ class BilinearTransformerNetwork(nn.Module):
         memory: torch.Tensor,
         memory_pad_mask: torch.Tensor,
     ):
-        decoder_input = self.make_decoder_input(tgt)
+        decoder_input = self.make_decoder_input(
+            tgt
+        )
 
         decoder_pad_mask = self.get_pad_mask(
             decoder_input
@@ -323,8 +313,13 @@ class BilinearTransformerNetwork(nn.Module):
             decoder_input.device,
         )
 
-        emb_tgt = self.embedding(decoder_input)
-        emb_tgt = self.add_pe(emb_tgt)
+        emb_tgt = self.embedding(
+            decoder_input
+        )
+
+        emb_tgt = self.add_pe(
+            emb_tgt
+        )
 
         dec_out = self.decoder(
             tgt=emb_tgt,
@@ -334,7 +329,9 @@ class BilinearTransformerNetwork(nn.Module):
             tgt_mask=causal_mask,
         )
 
-        logits = self.output_head(dec_out)
+        logits = self.output_head(
+            dec_out
+        )
 
         return logits
 
@@ -401,8 +398,13 @@ class BilinearTransformerNetwork(nn.Module):
                 generated.device,
             )
 
-            emb_tgt = self.embedding(generated)
-            emb_tgt = self.add_pe(emb_tgt)
+            emb_tgt = self.embedding(
+                generated
+            )
+
+            emb_tgt = self.add_pe(
+                emb_tgt
+            )
 
             dec_out = self.decoder(
                 tgt=emb_tgt,
@@ -412,13 +414,17 @@ class BilinearTransformerNetwork(nn.Module):
                 tgt_mask=causal_mask,
             )
 
-            logits = self.output_head(dec_out)
+            logits = self.output_head(
+                dec_out
+            )
 
             next_token = logits[
                 :,
                 -1,
                 :,
-            ].argmax(dim=-1)
+            ].argmax(
+                dim=-1
+            )
 
             next_token = torch.where(
                 finished,
@@ -463,7 +469,10 @@ class BilinearTransformerNetwork(nn.Module):
             )
 
             predictions = torch.cat(
-                [predictions, pad],
+                [
+                    predictions,
+                    pad,
+                ],
                 dim=1,
             )
         else:

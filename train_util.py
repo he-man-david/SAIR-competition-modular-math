@@ -225,6 +225,8 @@ class Trainer:
 
         plt.close(fig)
 
+
+
     def evaluate(
         self,
         model: torch.nn.Module,
@@ -294,47 +296,49 @@ class Trainer:
         vocab_size: int,
         max_seq_len: int,
         pad_id: int,
+        tokenizer,
     ) -> tuple[float, float]:
         if len(test_loader) == 0:
             raise ValueError(
                 "test_loader must contain at least one batch."
             )
-
+    
         test_loss_history: list[float] = []
         test_accuracy_history: list[float] = []
-
+        incorrect_samples: list[tuple[str, str, str, str, str]] = []
+    
         self.test_plot_display = None
-
+    
         model.eval()
-
+    
         with torch.no_grad():
             for batch_index, batch in enumerate(
                 tqdm(test_loader, desc="Testing"),
                 start=1,
             ):
                 batch = batch.to(self.device).long()
-
+    
                 a, b, p, tgt = batch.unbind(dim=1)
-
+    
                 logits = model(
                     a,
                     b,
                     p,
                     tgt,
                 )
-
-                test_loss = loss_fct(
+    
+                loss = loss_fct(
                     logits.reshape(-1, vocab_size),
                     tgt.reshape(-1),
                 )
-
+    
                 predictions = model.predict(
                     a,
                     b,
                     p,
                     max_new_tokens=max_seq_len,
                 )
-
+    
                 test_accuracy = (
                     self.compute_accuracy_from_predictions(
                         predictions,
@@ -342,42 +346,110 @@ class Trainer:
                         pad_id,
                     )
                 )
-
+    
                 test_loss_history.append(
-                    test_loss.item()
+                    loss.item()
                 )
-
+    
                 test_accuracy_history.append(
                     test_accuracy.item()
                 )
-
+    
+                if len(incorrect_samples) < 10:
+                    correct_tokens = (
+                        (predictions == tgt)
+                        | (tgt == pad_id)
+                    )
+    
+                    incorrect_mask = ~correct_tokens.all(dim=-1)
+    
+                    incorrect_indices = (
+                        incorrect_mask.nonzero(as_tuple=True)[0]
+                    )
+    
+                    for sample_index in incorrect_indices:
+                        if len(incorrect_samples) >= 10:
+                            break
+    
+                        sample_index = sample_index.item()
+    
+                        decoded_a = tokenizer.decode(
+                            a[sample_index].tolist()
+                        )[::-1]
+    
+                        decoded_b = tokenizer.decode(
+                            b[sample_index].tolist()
+                        )[::-1]
+    
+                        decoded_p = tokenizer.decode(
+                            p[sample_index].tolist()
+                        )[::-1]
+    
+                        decoded_target = tokenizer.decode(
+                            tgt[sample_index].tolist()
+                        )[::-1]
+    
+                        decoded_prediction = tokenizer.decode(
+                            predictions[sample_index].tolist()
+                        )[::-1]
+    
+                        incorrect_samples.append(
+                            (
+                                decoded_a,
+                                decoded_b,
+                                decoded_p,
+                                decoded_target,
+                                decoded_prediction,
+                            )
+                        )
+    
                 if batch_index % 10 == 0:
                     self.plot_test_loss(
                         test_loss_history,
                         test_accuracy_history,
                     )
-
+    
         if len(test_loss_history) % 10 != 0:
             self.plot_test_loss(
                 test_loss_history,
                 test_accuracy_history,
             )
-
+    
         average_test_loss = (
             sum(test_loss_history) / len(test_loss_history)
         )
-
+    
         average_test_accuracy = (
             sum(test_accuracy_history)
             / len(test_accuracy_history)
         )
-
+    
         print(
             f"Test Loss: {average_test_loss:.4f} | "
             f"Test Accuracy: {average_test_accuracy:.4f}"
         )
-
+    
+        if incorrect_samples:
+            print("\nIncorrect samples:")
+    
+            for sample_number, (
+                decoded_a,
+                decoded_b,
+                decoded_p,
+                decoded_target,
+                decoded_prediction,
+            ) in enumerate(incorrect_samples, start=1):
+                print(
+                    f"{sample_number}. "
+                    f"({decoded_a} * {decoded_b}) % {decoded_p} "
+                    f"= {decoded_target} | "
+                    f"Predicted: {decoded_prediction}"
+                )
+        else:
+            print("\nNo incorrect samples found.")
+    
         return average_test_loss, average_test_accuracy
+    
 
     @staticmethod
     def compute_accuracy(

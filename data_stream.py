@@ -1,3 +1,4 @@
+import math
 import random
 
 import torch
@@ -19,31 +20,51 @@ class MultiplicationDataStream:
         beta_beta: float = 5.0,
         rehearsal_fraction: float = 0.2,
         rehearsal_max: int = 100,
+        max_operand_multiple: int = 3,
         seed: int | None = None,
     ):
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0.")
-        if max_seq_len <= 0:
-            raise ValueError("max_seq_len must be greater than 0.")
+
+        if max_seq_len <= 1:
+            raise ValueError(
+                "max_seq_len must be greater than 1."
+            )
 
         if initial_max <= 0:
-            raise ValueError("initial_max must be greater than 0.")
+            raise ValueError(
+                "initial_max must be greater than 0."
+            )
 
         if growth_rate < 0:
-            raise ValueError("growth_rate must be non-negative.")
+            raise ValueError(
+                "growth_rate must be non-negative."
+            )
 
         if beta_alpha <= 0:
-            raise ValueError("beta_alpha must be greater than 0.")
+            raise ValueError(
+                "beta_alpha must be greater than 0."
+            )
 
         if beta_beta <= 0:
-            raise ValueError("beta_beta must be greater than 0.")
+            raise ValueError(
+                "beta_beta must be greater than 0."
+            )
+
         if not 0.0 <= rehearsal_fraction <= 1.0:
             raise ValueError(
                 "rehearsal_fraction must be between 0 and 1."
             )
 
         if rehearsal_max <= 0:
-            raise ValueError("rehearsal_max must be greater than 0.")
+            raise ValueError(
+                "rehearsal_max must be greater than 0."
+            )
+
+        if max_operand_multiple < 0:
+            raise ValueError(
+                "max_operand_multiple must be non-negative."
+            )
 
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -52,14 +73,24 @@ class MultiplicationDataStream:
         self.initial_max = float(initial_max)
         self.current_max = float(initial_max)
         self.growth_rate = float(growth_rate)
+
         self.beta_alpha = float(beta_alpha)
         self.beta_beta = float(beta_beta)
 
         self.rehearsal_fraction = float(rehearsal_fraction)
         self.rehearsal_max = rehearsal_max
+        self.max_operand_multiple = max_operand_multiple
 
         self.pad_id = tokenizer.char_to_int["<pad>"]
         self.eos_id = tokenizer.char_to_int["<eos>"]
+
+        self.max_operand_value = (
+            10 ** self.max_seq_len
+        ) - 1
+
+        self.max_modulus_value = (
+            10 ** (self.max_seq_len - 1)
+        )
 
         self.seed = seed
         self.rng = random.Random(seed)
@@ -69,38 +100,47 @@ class MultiplicationDataStream:
         rehearsal_count = round(
             self.batch_size * self.rehearsal_fraction
         )
-        curriculum_count = self.batch_size - rehearsal_count
+
+        curriculum_count = (
+            self.batch_size - rehearsal_count
+        )
 
         samples: list[list[list[int]]] = []
 
+        curriculum_max = self._get_generation_max(
+            self.current_max
+        )
+
         for _ in range(curriculum_count):
-            a = self._sample_curriculum_integer()
-            b = self._sample_curriculum_integer()
-            p = self.rng.randint(
-                2,
-                max(2, int(self.current_max)),
+            a, b, p = self._sample_uniform_target_operands(
+                rng=self.rng,
+                max_value=curriculum_max,
             )
 
             samples.append(
-                self._encode_sample(a, b, p)
+                self._encode_sample(
+                    a,
+                    b,
+                    p,
+                )
             )
+
+        rehearsal_max = self._get_generation_max(
+            self.rehearsal_max
+        )
 
         for _ in range(rehearsal_count):
-            a = self.rng.randint(
-                0,
-                self.rehearsal_max,
-            )
-            b = self.rng.randint(
-                0,
-                self.rehearsal_max,
-            )
-            p = self.rng.randint(
-                2,
-                self.rehearsal_max,
+            a, b, p = self._sample_uniform_target_operands(
+                rng=self.rng,
+                max_value=rehearsal_max,
             )
 
             samples.append(
-                self._encode_sample(a, b, p)
+                self._encode_sample(
+                    a,
+                    b,
+                    p,
+                )
             )
 
         self.rng.shuffle(samples)
@@ -111,7 +151,9 @@ class MultiplicationDataStream:
         )
 
         self.step += 1
-        self.current_max *= 1.0 + self.growth_rate
+        self.current_max *= (
+            1.0 + self.growth_rate
+        )
 
         return batch
 
@@ -123,10 +165,14 @@ class MultiplicationDataStream:
         seed: int = 10_000,
     ) -> DataLoader:
         if num_steps <= 0:
-            raise ValueError("num_steps must be greater than 0.")
+            raise ValueError(
+                "num_steps must be greater than 0."
+            )
 
         if lookahead_steps < 0:
-            raise ValueError("lookahead_steps must be non-negative.")
+            raise ValueError(
+                "lookahead_steps must be non-negative."
+            )
 
         validation_batch_size = (
             self.batch_size
@@ -135,23 +181,31 @@ class MultiplicationDataStream:
         )
 
         if validation_batch_size <= 0:
-            raise ValueError("batch_size must be greater than 0.")
+            raise ValueError(
+                "batch_size must be greater than 0."
+            )
 
         validation_rng = random.Random(seed)
 
         validation_max = self.current_max * (
-            (1.0 + self.growth_rate) ** lookahead_steps
+            (1.0 + self.growth_rate)
+            ** lookahead_steps
         )
 
         rehearsal_count = round(
-            validation_batch_size * self.rehearsal_fraction
+            validation_batch_size
+            * self.rehearsal_fraction
         )
 
         curriculum_count = (
-            validation_batch_size - rehearsal_count
+            validation_batch_size
+            - rehearsal_count
         )
 
-        total_samples = num_steps * validation_batch_size
+        total_samples = (
+            num_steps
+            * validation_batch_size
+        )
 
         dataset = torch.empty(
             (
@@ -162,71 +216,71 @@ class MultiplicationDataStream:
             dtype=torch.long,
         )
 
+        rehearsal_max = self._get_generation_max(
+            self.rehearsal_max
+        )
+
         for validation_step in range(num_steps):
             samples: list[list[list[int]]] = []
 
+            curriculum_max = self._get_generation_max(
+                validation_max
+            )
+
             for _ in range(curriculum_count):
-                a = int(
-                    validation_rng.betavariate(
-                        self.beta_alpha,
-                        self.beta_beta,
+                a, b, p = (
+                    self._sample_uniform_target_operands(
+                        rng=validation_rng,
+                        max_value=curriculum_max,
                     )
-                    * validation_max
-                )
-
-                b = int(
-                    validation_rng.betavariate(
-                        self.beta_alpha,
-                        self.beta_beta,
-                    )
-                    * validation_max
-                )
-
-                p = validation_rng.randint(
-                    1,
-                    max(1, int(validation_max)),
                 )
 
                 samples.append(
-                    self._encode_sample(a, b, p)
+                    self._encode_sample(
+                        a,
+                        b,
+                        p,
+                    )
                 )
 
             for _ in range(rehearsal_count):
-                a = validation_rng.randint(
-                    0,
-                    self.rehearsal_max,
-                )
-
-                b = validation_rng.randint(
-                    0,
-                    self.rehearsal_max,
-                )
-
-                p = validation_rng.randint(
-                    1,
-                    self.rehearsal_max,
+                a, b, p = (
+                    self._sample_uniform_target_operands(
+                        rng=validation_rng,
+                        max_value=rehearsal_max,
+                    )
                 )
 
                 samples.append(
-                    self._encode_sample(a, b, p)
+                    self._encode_sample(
+                        a,
+                        b,
+                        p,
+                    )
                 )
 
             validation_rng.shuffle(samples)
 
             start_index = (
-                validation_step * validation_batch_size
+                validation_step
+                * validation_batch_size
             )
 
             end_index = (
-                start_index + validation_batch_size
+                start_index
+                + validation_batch_size
             )
 
-            dataset[start_index:end_index] = torch.tensor(
-                samples,
-                dtype=torch.long,
+            dataset[start_index:end_index] = (
+                torch.tensor(
+                    samples,
+                    dtype=torch.long,
+                )
             )
 
-            validation_max *= 1.0 + self.growth_rate
+            validation_max *= (
+                1.0 + self.growth_rate
+            )
 
         return DataLoader(
             dataset,
@@ -265,24 +319,27 @@ class MultiplicationDataStream:
             )
 
         evaluation_rng = random.Random(seed)
+
+        fixed_max = self._get_generation_max(
+            max_value
+        )
+
         samples: list[list[list[int]]] = []
 
         for _ in range(num_samples):
-            a = evaluation_rng.randint(
-                0,
-                max_value,
-            )
-            b = evaluation_rng.randint(
-                0,
-                max_value,
-            )
-            p = evaluation_rng.randint(
-                1,
-                max_value,
+            a, b, p = (
+                self._sample_uniform_target_operands(
+                    rng=evaluation_rng,
+                    max_value=fixed_max,
+                )
             )
 
             samples.append(
-                self._encode_sample(a, b, p)
+                self._encode_sample(
+                    a,
+                    b,
+                    p,
+                )
             )
 
         dataset = torch.tensor(
@@ -303,9 +360,13 @@ class MultiplicationDataStream:
         pin_memory: bool = True,
     ) -> DataLoader:
         if num_steps <= 0:
-            raise ValueError("num_steps must be greater than 0.")
+            raise ValueError(
+                "num_steps must be greater than 0."
+            )
 
-        max_token_id = max(self.tokenizer.char_to_int.values())
+        max_token_id = max(
+            self.tokenizer.char_to_int.values()
+        )
 
         if max_token_id <= 255:
             storage_dtype = torch.uint8
@@ -314,7 +375,10 @@ class MultiplicationDataStream:
         else:
             storage_dtype = torch.int32
 
-        total_samples = num_steps * self.batch_size
+        total_samples = (
+            num_steps
+            * self.batch_size
+        )
 
         dataset = torch.empty(
             (
@@ -330,13 +394,25 @@ class MultiplicationDataStream:
 
         for chunk_step in tqdm(
             range(num_steps),
-            desc=f"Generating {num_steps:,} training batches",
+            desc=(
+                f"Generating {num_steps:,} "
+                f"training batches"
+            ),
         ):
-            start_index = chunk_step * self.batch_size
-            end_index = start_index + self.batch_size
+            start_index = (
+                chunk_step
+                * self.batch_size
+            )
+
+            end_index = (
+                start_index
+                + self.batch_size
+            )
 
             dataset[start_index:end_index] = (
-                self.next_batch().to(storage_dtype)
+                self.next_batch().to(
+                    storage_dtype
+                )
             )
 
         self.step = original_step
@@ -350,15 +426,93 @@ class MultiplicationDataStream:
             pin_memory=pin_memory,
         )
 
-    def _sample_curriculum_integer(self) -> int:
-        beta_sample = self.rng.betavariate(
-            self.beta_alpha,
-            self.beta_beta,
+    def _get_generation_max(
+        self,
+        max_value: int | float,
+    ) -> int:
+        return min(
+            max(
+                2,
+                int(max_value),
+            ),
+            self.max_modulus_value,
         )
 
-        return int(
-            beta_sample * self.current_max
+    def _sample_uniform_target_operands(
+        self,
+        rng: random.Random,
+        max_value: int,
+    ) -> tuple[int, int, int]:
+        target = rng.randint(
+            0,
+            max_value - 1,
         )
+
+        p = rng.randint(
+            target + 1,
+            max_value,
+        )
+
+        while True:
+            base_a = rng.randint(
+                1,
+                p - 1,
+            )
+
+            if math.gcd(base_a, p) == 1:
+                break
+
+        inverse_a = pow(
+            base_a,
+            -1,
+            p,
+        )
+
+        base_b = (
+            target
+            * inverse_a
+        ) % p
+
+        max_k1 = min(
+            self.max_operand_multiple,
+            (
+                self.max_operand_value
+                - base_a
+            ) // p,
+        )
+
+        max_k2 = min(
+            self.max_operand_multiple,
+            (
+                self.max_operand_value
+                - base_b
+            ) // p,
+        )
+
+        k1 = rng.randint(
+            0,
+            max_k1,
+        )
+
+        k2 = rng.randint(
+            0,
+            max_k2,
+        )
+
+        a = (
+            base_a
+            + k1 * p
+        )
+
+        b = (
+            base_b
+            + k2 * p
+        )
+
+        if rng.random() < 0.5:
+            a, b = b, a
+
+        return a, b, p
 
     def _encode_sample(
         self,
@@ -366,11 +520,22 @@ class MultiplicationDataStream:
         b: int,
         p: int,
     ) -> list[list[int]]:
-        target = (a * b) % p
+        target = (
+            a * b
+        ) % p
 
-        a_tokens = self.tokenizer.encode(str(a))
-        b_tokens = self.tokenizer.encode(str(b))
-        p_tokens = self.tokenizer.encode(str(p))
+        a_tokens = self.tokenizer.encode(
+            str(a)
+        )
+
+        b_tokens = self.tokenizer.encode(
+            str(b)
+        )
+
+        p_tokens = self.tokenizer.encode(
+            str(p)
+        )
+
         target_tokens = self.tokenizer.encode(
             str(target)
         )
@@ -380,7 +545,9 @@ class MultiplicationDataStream:
         p_tokens.reverse()
         target_tokens.reverse()
 
-        target_tokens.append(self.eos_id)
+        target_tokens.append(
+            self.eos_id
+        )
 
         self._check_sequence_length(
             name="a",
@@ -431,12 +598,14 @@ class MultiplicationDataStream:
         token_ids: list[int],
     ) -> list[int]:
         padding_length = (
-            self.max_seq_len - len(token_ids)
+            self.max_seq_len
+            - len(token_ids)
         )
 
         return (
             token_ids
-            + [self.pad_id] * padding_length
+            + [self.pad_id]
+            * padding_length
         )
 
     def state_dict(self) -> dict:
@@ -456,7 +625,10 @@ class MultiplicationDataStream:
             "random_state",
         }
 
-        missing_keys = required_keys - state.keys()
+        missing_keys = (
+            required_keys
+            - state.keys()
+        )
 
         if missing_keys:
             raise KeyError(
@@ -464,10 +636,14 @@ class MultiplicationDataStream:
                 f"{sorted(missing_keys)}"
             )
 
-        self.step = int(state["step"])
+        self.step = int(
+            state["step"]
+        )
+
         self.current_max = float(
             state["current_max"]
         )
+
         self.rng.setstate(
             state["random_state"]
         )
@@ -475,4 +651,6 @@ class MultiplicationDataStream:
     def reset(self) -> None:
         self.step = 0
         self.current_max = self.initial_max
-        self.rng = random.Random(self.seed)
+        self.rng = random.Random(
+            self.seed
+        )
