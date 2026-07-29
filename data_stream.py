@@ -112,7 +112,7 @@ class MultiplicationDataStream:
         )
 
         for _ in range(curriculum_count):
-            a, b, p = self._sample_uniform_target_operands(
+            a, b, p = self._sample_betavariate_target_operands(
                 rng=self.rng,
                 max_value=curriculum_max,
             )
@@ -130,7 +130,7 @@ class MultiplicationDataStream:
         )
 
         for _ in range(rehearsal_count):
-            a, b, p = self._sample_uniform_target_operands(
+            a, b, p = self._sample_betavariate_target_operands(
                 rng=self.rng,
                 max_value=rehearsal_max,
             )
@@ -229,7 +229,7 @@ class MultiplicationDataStream:
 
             for _ in range(curriculum_count):
                 a, b, p = (
-                    self._sample_uniform_target_operands(
+                    self._sample_betavariate_target_operands(
                         rng=validation_rng,
                         max_value=curriculum_max,
                     )
@@ -245,7 +245,7 @@ class MultiplicationDataStream:
 
             for _ in range(rehearsal_count):
                 a, b, p = (
-                    self._sample_uniform_target_operands(
+                    self._sample_betavariate_target_operands(
                         rng=validation_rng,
                         max_value=rehearsal_max,
                     )
@@ -328,7 +328,7 @@ class MultiplicationDataStream:
 
         for _ in range(num_samples):
             a, b, p = (
-                self._sample_uniform_target_operands(
+                self._sample_betavariate_target_operands(
                     rng=evaluation_rng,
                     max_value=fixed_max,
                 )
@@ -438,18 +438,21 @@ class MultiplicationDataStream:
             self.max_modulus_value,
         )
 
-    def _sample_uniform_target_operands(
+    def _sample_betavariate_target_operands(
         self,
         rng: random.Random,
         max_value: int,
     ) -> tuple[int, int, int]:
-        target = rng.randint(
-            0,
-            max_value - 1,
+        target = int(
+            rng.betavariate(
+                self.beta_alpha,
+                self.beta_beta,
+            )
+            * max_value
         )
 
         p = rng.randint(
-            target + 1,
+            max(2, target + 1),
             max_value,
         )
 
