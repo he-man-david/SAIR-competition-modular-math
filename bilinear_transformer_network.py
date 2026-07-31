@@ -38,12 +38,7 @@ class BilinearTransformerNetwork(nn.Module):
 
         self.bilinear_w = nn.ModuleDict(
             {
-                "a_b": nn.Linear(
-                    d_model,
-                    d_model,
-                    bias=False,
-                ),
-                "b_a": nn.Linear(
+                "a_b_p": nn.Linear(
                     d_model,
                     d_model,
                     bias=False,
@@ -240,21 +235,13 @@ class BilinearTransformerNetwork(nn.Module):
         emb_b = self.embedding(b)
         emb_p = self.embedding(p)
 
-        bilinear_context_ab = (
-            self.create_bilinear_context(
-                "a_b",
-                emb_a,
-                emb_b,
-                b,
-            )
-        )
 
-        bilinear_context_ba = (
+        bilinear_context_a_b_p = (
             self.create_bilinear_context(
-                "b_a",
-                emb_b,
-                emb_a,
-                a,
+                "a_b_p",
+                emb_a * emb_b,
+                emb_p,
+                p,
             )
         )
 
@@ -263,8 +250,8 @@ class BilinearTransformerNetwork(nn.Module):
                 emb_a,
                 emb_b,
                 emb_p,
-                bilinear_context_ab,
-                bilinear_context_ba,
+                emb_a * emb_b,
+                bilinear_context_a_b_p
             ],
             dim=-1,
         )
@@ -275,9 +262,8 @@ class BilinearTransformerNetwork(nn.Module):
 
         x = (
             x
-            + bilinear_context_ab
-            + bilinear_context_ba
             + emb_p
+            + bilinear_context_a_b_p
         )
 
         x = x.masked_fill(
