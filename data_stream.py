@@ -2,13 +2,46 @@ import math
 import random
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from tokenizer import DigitTokenizer
 
 
-class MultiplicationDataStream:
+class MultiplicationModuloTensorDataset(Dataset):
+    def __init__(
+        self,
+        a_token_ids: torch.Tensor,
+        b_token_ids: torch.Tensor,
+        modulus_token_ids: torch.Tensor,
+        product_token_ids: torch.Tensor,
+        modular_result_token_ids: torch.Tensor,
+    ):
+        self.a_token_ids = a_token_ids
+        self.b_token_ids = b_token_ids
+        self.modulus_token_ids = modulus_token_ids
+        self.product_token_ids = product_token_ids
+        self.modular_result_token_ids = modular_result_token_ids
+
+    def __len__(self) -> int:
+        return self.a_token_ids.shape[0]
+
+    def __getitem__(
+        self,
+        sample_index: int,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "a": self.a_token_ids[sample_index],
+            "b": self.b_token_ids[sample_index],
+            "modulus": self.modulus_token_ids[sample_index],
+            "product": self.product_token_ids[sample_index],
+            "modular_result": self.modular_result_token_ids[
+                sample_index
+            ],
+        }
+
+
+class MultiplicationModuloDataStream:
     def __init__(
         self,
         tokenizer: DigitTokenizer,
@@ -24,7 +57,9 @@ class MultiplicationDataStream:
         seed: int | None = None,
     ):
         if batch_size <= 0:
-            raise ValueError("batch_size must be greater than 0.")
+            raise ValueError(
+                "batch_size must be greater than 0."
+            )
 
         if max_seq_len <= 1:
             raise ValueError(
@@ -68,7 +103,11 @@ class MultiplicationDataStream:
 
         self.tokenizer = tokenizer
         self.batch_size = batch_size
-        self.max_seq_len = max_seq_len
+
+        self.operand_seq_len = max_seq_len
+        self.modulus_seq_len = max_seq_len
+        self.modular_result_seq_len = max_seq_len
+        self.product_seq_len = 2 * max_seq_len + 1
 
         self.initial_max = float(initial_max)
         self.current_max = float(initial_max)
@@ -77,80 +116,130 @@ class MultiplicationDataStream:
         self.beta_alpha = float(beta_alpha)
         self.beta_beta = float(beta_beta)
 
-        self.rehearsal_fraction = float(rehearsal_fraction)
-        self.rehearsal_max = rehearsal_max
-        self.max_operand_multiple = max_operand_multiple
+        self.rehearsal_fraction = float(
+            rehearsal_fraction
+        )
 
-        self.pad_id = tokenizer.char_to_int["<pad>"]
-        self.eos_id = tokenizer.char_to_int["<eos>"]
+        self.rehearsal_max = rehearsal_max
+
+        self.max_operand_multiple = (
+            max_operand_multiple
+        )
+
+        self.pad_id = tokenizer.char_to_int[
+            "<pad>"
+        ]
+
+        self.eos_id = tokenizer.char_to_int[
+            "<eos>"
+        ]
 
         self.max_operand_value = (
-            10 ** self.max_seq_len
+            10**self.operand_seq_len
         ) - 1
 
         self.max_modulus_value = (
-            10 ** (self.max_seq_len - 1)
+            10 ** (self.modulus_seq_len - 1)
         )
 
         self.seed = seed
-        self.rng = random.Random(seed)
+        self.random_number_generator = random.Random(
+            seed
+        )
+
         self.step = 0
 
-    def next_batch(self) -> torch.Tensor:
-        rehearsal_count = round(
-            self.batch_size * self.rehearsal_fraction
+    def next_batch(
+        self,
+    ) -> dict[str, torch.Tensor]:
+        rehearsal_sample_count = round(
+            self.batch_size
+            * self.rehearsal_fraction
         )
 
-        curriculum_count = (
-            self.batch_size - rehearsal_count
+        curriculum_sample_count = (
+            self.batch_size
+            - rehearsal_sample_count
         )
 
-        samples: list[list[list[int]]] = []
+        encoded_samples: list[
+            dict[str, list[int]]
+        ] = []
 
-        curriculum_max = self._get_generation_max(
-            self.current_max
-        )
-
-        for _ in range(curriculum_count):
-            a, b, p = self._sample_betavariate_target_operands(
-                rng=self.rng,
-                max_value=curriculum_max,
+        curriculum_generation_maximum = (
+            self._get_generation_maximum(
+                self.current_max
             )
+        )
 
-            samples.append(
-                self._encode_sample(
-                    a,
-                    b,
-                    p,
+        for _ in range(
+            curriculum_sample_count
+        ):
+            (
+                a_value,
+                b_value,
+                modulus_value,
+            ) = (
+                self._sample_operands_and_modulus(
+                    random_number_generator=(
+                        self.random_number_generator
+                    ),
+                    maximum_modular_result=(
+                        curriculum_generation_maximum
+                    ),
                 )
             )
 
-        rehearsal_max = self._get_generation_max(
-            self.rehearsal_max
-        )
-
-        for _ in range(rehearsal_count):
-            a, b, p = self._sample_betavariate_target_operands(
-                rng=self.rng,
-                max_value=rehearsal_max,
-            )
-
-            samples.append(
+            encoded_samples.append(
                 self._encode_sample(
-                    a,
-                    b,
-                    p,
+                    a_value=a_value,
+                    b_value=b_value,
+                    modulus_value=modulus_value,
                 )
             )
 
-        self.rng.shuffle(samples)
+        rehearsal_generation_maximum = (
+            self._get_generation_maximum(
+                self.rehearsal_max
+            )
+        )
 
-        batch = torch.tensor(
-            samples,
-            dtype=torch.long,
+        for _ in range(
+            rehearsal_sample_count
+        ):
+            (
+                a_value,
+                b_value,
+                modulus_value,
+            ) = (
+                self._sample_operands_and_modulus(
+                    random_number_generator=(
+                        self.random_number_generator
+                    ),
+                    maximum_modular_result=(
+                        rehearsal_generation_maximum
+                    ),
+                )
+            )
+
+            encoded_samples.append(
+                self._encode_sample(
+                    a_value=a_value,
+                    b_value=b_value,
+                    modulus_value=modulus_value,
+                )
+            )
+
+        self.random_number_generator.shuffle(
+            encoded_samples
+        )
+
+        batch = self._convert_encoded_samples_to_batch(
+            encoded_samples
         )
 
         self.step += 1
+
         self.current_max *= (
             1.0 + self.growth_rate
         )
@@ -185,105 +274,120 @@ class MultiplicationDataStream:
                 "batch_size must be greater than 0."
             )
 
-        validation_rng = random.Random(seed)
-
-        validation_max = self.current_max * (
-            (1.0 + self.growth_rate)
-            ** lookahead_steps
+        validation_random_number_generator = (
+            random.Random(seed)
         )
 
-        rehearsal_count = round(
+        validation_maximum = (
+            self.current_max
+            * (
+                1.0 + self.growth_rate
+            ) ** lookahead_steps
+        )
+
+        rehearsal_sample_count = round(
             validation_batch_size
             * self.rehearsal_fraction
         )
 
-        curriculum_count = (
+        curriculum_sample_count = (
             validation_batch_size
-            - rehearsal_count
+            - rehearsal_sample_count
         )
 
-        total_samples = (
-            num_steps
-            * validation_batch_size
+        encoded_validation_samples: list[
+            dict[str, list[int]]
+        ] = []
+
+        rehearsal_generation_maximum = (
+            self._get_generation_maximum(
+                self.rehearsal_max
+            )
         )
 
-        dataset = torch.empty(
-            (
-                total_samples,
-                4,
-                self.max_seq_len,
-            ),
-            dtype=torch.long,
-        )
-
-        rehearsal_max = self._get_generation_max(
-            self.rehearsal_max
-        )
-
-        for validation_step in range(num_steps):
-            samples: list[list[list[int]]] = []
-
-            curriculum_max = self._get_generation_max(
-                validation_max
+        for _ in range(num_steps):
+            curriculum_generation_maximum = (
+                self._get_generation_maximum(
+                    validation_maximum
+                )
             )
 
-            for _ in range(curriculum_count):
-                a, b, p = (
-                    self._sample_betavariate_target_operands(
-                        rng=validation_rng,
-                        max_value=curriculum_max,
+            encoded_validation_step_samples: list[
+                dict[str, list[int]]
+            ] = []
+
+            for _ in range(
+                curriculum_sample_count
+            ):
+                (
+                    a_value,
+                    b_value,
+                    modulus_value,
+                ) = (
+                    self._sample_operands_and_modulus(
+                        random_number_generator=(
+                            validation_random_number_generator
+                        ),
+                        maximum_modular_result=(
+                            curriculum_generation_maximum
+                        ),
                     )
                 )
 
-                samples.append(
+                encoded_validation_step_samples.append(
                     self._encode_sample(
-                        a,
-                        b,
-                        p,
+                        a_value=a_value,
+                        b_value=b_value,
+                        modulus_value=modulus_value,
                     )
                 )
 
-            for _ in range(rehearsal_count):
-                a, b, p = (
-                    self._sample_betavariate_target_operands(
-                        rng=validation_rng,
-                        max_value=rehearsal_max,
+            for _ in range(
+                rehearsal_sample_count
+            ):
+                (
+                    a_value,
+                    b_value,
+                    modulus_value,
+                ) = (
+                    self._sample_operands_and_modulus(
+                        random_number_generator=(
+                            validation_random_number_generator
+                        ),
+                        maximum_modular_result=(
+                            rehearsal_generation_maximum
+                        ),
                     )
                 )
 
-                samples.append(
+                encoded_validation_step_samples.append(
                     self._encode_sample(
-                        a,
-                        b,
-                        p,
+                        a_value=a_value,
+                        b_value=b_value,
+                        modulus_value=modulus_value,
                     )
                 )
 
-            validation_rng.shuffle(samples)
-
-            start_index = (
-                validation_step
-                * validation_batch_size
+            validation_random_number_generator.shuffle(
+                encoded_validation_step_samples
             )
 
-            end_index = (
-                start_index
-                + validation_batch_size
+            encoded_validation_samples.extend(
+                encoded_validation_step_samples
             )
 
-            dataset[start_index:end_index] = (
-                torch.tensor(
-                    samples,
-                    dtype=torch.long,
-                )
-            )
-
-            validation_max *= (
+            validation_maximum *= (
                 1.0 + self.growth_rate
             )
 
+        validation_dataset = (
+            self._create_tensor_dataset(
+                encoded_validation_samples
+            )
+        )
+
         return DataLoader(
-            dataset,
+            validation_dataset,
             batch_size=validation_batch_size,
             shuffle=False,
             drop_last=False,
@@ -318,40 +422,56 @@ class MultiplicationDataStream:
                 "batch_size must be greater than 0."
             )
 
-        evaluation_rng = random.Random(seed)
-
-        fixed_max = self._get_generation_max(
-            max_value
+        evaluation_random_number_generator = (
+            random.Random(seed)
         )
 
-        samples: list[list[list[int]]] = []
+        fixed_generation_maximum = (
+            self._get_generation_maximum(
+                max_value
+            )
+        )
+
+        encoded_evaluation_samples: list[
+            dict[str, list[int]]
+        ] = []
 
         for _ in range(num_samples):
-            a, b, p = (
-                self._sample_betavariate_target_operands(
-                    rng=evaluation_rng,
-                    max_value=fixed_max,
+            (
+                a_value,
+                b_value,
+                modulus_value,
+            ) = (
+                self._sample_operands_and_modulus(
+                    random_number_generator=(
+                        evaluation_random_number_generator
+                    ),
+                    maximum_modular_result=(
+                        fixed_generation_maximum
+                    ),
                 )
             )
 
-            samples.append(
+            encoded_evaluation_samples.append(
                 self._encode_sample(
-                    a,
-                    b,
-                    p,
+                    a_value=a_value,
+                    b_value=b_value,
+                    modulus_value=modulus_value,
                 )
             )
 
-        dataset = torch.tensor(
-            samples,
-            dtype=torch.long,
+        evaluation_dataset = (
+            self._create_tensor_dataset(
+                encoded_evaluation_samples
+            )
         )
 
         return DataLoader(
-            dataset,
+            evaluation_dataset,
             batch_size=loader_batch_size,
             shuffle=False,
             drop_last=False,
+            pin_memory=True,
         )
 
     def create_training_chunk_loader(
@@ -364,244 +484,357 @@ class MultiplicationDataStream:
                 "num_steps must be greater than 0."
             )
 
-        max_token_id = max(
-            self.tokenizer.char_to_int.values()
+        original_data_stream_state = (
+            self.state_dict()
         )
 
-        if max_token_id <= 255:
-            storage_dtype = torch.uint8
-        elif max_token_id <= 32767:
-            storage_dtype = torch.int16
-        else:
-            storage_dtype = torch.int32
+        encoded_training_samples: list[
+            dict[str, list[int]]
+        ] = []
 
-        total_samples = (
-            num_steps
-            * self.batch_size
-        )
-
-        dataset = torch.empty(
-            (
-                total_samples,
-                4,
-                self.max_seq_len,
-            ),
-            dtype=storage_dtype,
-        )
-
-        original_step = self.step
-        original_current_max = self.current_max
-
-        for chunk_step in tqdm(
+        for _ in tqdm(
             range(num_steps),
             desc=(
                 f"Generating {num_steps:,} "
                 f"training batches"
             ),
         ):
-            start_index = (
-                chunk_step
-                * self.batch_size
-            )
+            training_batch = self.next_batch()
 
-            end_index = (
-                start_index
-                + self.batch_size
-            )
-
-            dataset[start_index:end_index] = (
-                self.next_batch().to(
-                    storage_dtype
+            for sample_index in range(
+                self.batch_size
+            ):
+                encoded_training_samples.append(
+                    {
+                        "a": training_batch[
+                            "a"
+                        ][sample_index].tolist(),
+                        "b": training_batch[
+                            "b"
+                        ][sample_index].tolist(),
+                        "modulus": training_batch[
+                            "modulus"
+                        ][sample_index].tolist(),
+                        "product": training_batch[
+                            "product"
+                        ][sample_index].tolist(),
+                        "modular_result": (
+                            training_batch[
+                                "modular_result"
+                            ][sample_index].tolist()
+                        ),
+                    }
                 )
-            )
 
-        self.step = original_step
-        self.current_max = original_current_max
+        self.load_state_dict(
+            original_data_stream_state
+        )
+
+        training_dataset = (
+            self._create_tensor_dataset(
+                encoded_training_samples
+            )
+        )
 
         return DataLoader(
-            dataset,
+            training_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             drop_last=True,
             pin_memory=pin_memory,
         )
 
-    def _get_generation_max(
+    def _get_generation_maximum(
         self,
-        max_value: int | float,
+        maximum_value: int | float,
     ) -> int:
         return min(
             max(
                 2,
-                int(max_value),
+                int(maximum_value),
             ),
             self.max_modulus_value,
         )
 
-    def _sample_betavariate_target_operands(
+    def _sample_operands_and_modulus(
         self,
-        rng: random.Random,
-        max_value: int,
+        random_number_generator: random.Random,
+        maximum_modular_result: int,
     ) -> tuple[int, int, int]:
-        target = int(
-            rng.betavariate(
+        modular_result_value = int(
+            random_number_generator.betavariate(
                 self.beta_alpha,
                 self.beta_beta,
             )
-            * max_value
+            * maximum_modular_result
         )
 
-        p = rng.randint(
-            max(2, target + 1),
-            max_value,
+        modulus_value = (
+            random_number_generator.randint(
+                max(
+                    2,
+                    modular_result_value + 1,
+                ),
+                maximum_modular_result,
+            )
         )
 
         while True:
-            base_a = rng.randint(
-                1,
-                p - 1,
+            base_a_value = (
+                random_number_generator.randint(
+                    1,
+                    modulus_value - 1,
+                )
             )
 
-            if math.gcd(base_a, p) == 1:
+            if (
+                math.gcd(
+                    base_a_value,
+                    modulus_value,
+                )
+                == 1
+            ):
                 break
 
-        inverse_a = pow(
-            base_a,
+        inverse_a_value = pow(
+            base_a_value,
             -1,
-            p,
+            modulus_value,
         )
 
-        base_b = (
-            target
-            * inverse_a
-        ) % p
+        base_b_value = (
+            modular_result_value
+            * inverse_a_value
+        ) % modulus_value
 
-        max_k1 = min(
+        maximum_a_modulus_multiple = min(
             self.max_operand_multiple,
             (
                 self.max_operand_value
-                - base_a
-            ) // p,
+                - base_a_value
+            )
+            // modulus_value,
         )
 
-        max_k2 = min(
+        maximum_b_modulus_multiple = min(
             self.max_operand_multiple,
             (
                 self.max_operand_value
-                - base_b
-            ) // p,
+                - base_b_value
+            )
+            // modulus_value,
         )
 
-        k1 = rng.randint(
-            0,
-            max_k1,
+        a_modulus_multiple = (
+            random_number_generator.randint(
+                0,
+                maximum_a_modulus_multiple,
+            )
         )
 
-        k2 = rng.randint(
-            0,
-            max_k2,
+        b_modulus_multiple = (
+            random_number_generator.randint(
+                0,
+                maximum_b_modulus_multiple,
+            )
         )
 
-        a = (
-            base_a
-            + k1 * p
+        a_value = (
+            base_a_value
+            + a_modulus_multiple
+            * modulus_value
         )
 
-        b = (
-            base_b
-            + k2 * p
+        b_value = (
+            base_b_value
+            + b_modulus_multiple
+            * modulus_value
         )
 
-        if rng.random() < 0.5:
-            a, b = b, a
+        if (
+            random_number_generator.random()
+            < 0.5
+        ):
+            a_value, b_value = (
+                b_value,
+                a_value,
+            )
 
-        return a, b, p
+        return (
+            a_value,
+            b_value,
+            modulus_value,
+        )
 
     def _encode_sample(
         self,
-        a: int,
-        b: int,
-        p: int,
-    ) -> list[list[int]]:
-        target = (
-            a * b
-        ) % p
-
-        a_tokens = self.tokenizer.encode(
-            str(a)
+        a_value: int,
+        b_value: int,
+        modulus_value: int,
+    ) -> dict[str, list[int]]:
+        product_value = (
+            a_value * b_value
         )
 
-        b_tokens = self.tokenizer.encode(
-            str(b)
+        modular_result_value = (
+            product_value % modulus_value
         )
 
-        p_tokens = self.tokenizer.encode(
-            str(p)
+        a_token_ids = self.tokenizer.encode(
+            str(a_value)
         )
 
-        target_tokens = self.tokenizer.encode(
-            str(target)
+        b_token_ids = self.tokenizer.encode(
+            str(b_value)
         )
 
-        a_tokens.reverse()
-        b_tokens.reverse()
-        p_tokens.reverse()
-        target_tokens.reverse()
+        modulus_token_ids = (
+            self.tokenizer.encode(
+                str(modulus_value)
+            )
+        )
 
-        target_tokens.append(
+        product_token_ids = (
+            self.tokenizer.encode(
+                str(product_value)
+            )
+        )
+
+        modular_result_token_ids = (
+            self.tokenizer.encode(
+                str(modular_result_value)
+            )
+        )
+
+        a_token_ids.reverse()
+        b_token_ids.reverse()
+        modulus_token_ids.reverse()
+        product_token_ids.reverse()
+        modular_result_token_ids.reverse()
+
+        product_token_ids.append(
+            self.eos_id
+        )
+
+        modular_result_token_ids.append(
             self.eos_id
         )
 
         self._check_sequence_length(
-            name="a",
-            value=a,
-            token_ids=a_tokens,
+            sequence_name="a",
+            integer_value=a_value,
+            token_ids=a_token_ids,
+            maximum_sequence_length=(
+                self.operand_seq_len
+            ),
         )
 
         self._check_sequence_length(
-            name="b",
-            value=b,
-            token_ids=b_tokens,
+            sequence_name="b",
+            integer_value=b_value,
+            token_ids=b_token_ids,
+            maximum_sequence_length=(
+                self.operand_seq_len
+            ),
         )
 
         self._check_sequence_length(
-            name="p",
-            value=p,
-            token_ids=p_tokens,
+            sequence_name="modulus",
+            integer_value=modulus_value,
+            token_ids=modulus_token_ids,
+            maximum_sequence_length=(
+                self.modulus_seq_len
+            ),
         )
 
         self._check_sequence_length(
-            name="target",
-            value=target,
-            token_ids=target_tokens,
+            sequence_name="product",
+            integer_value=product_value,
+            token_ids=product_token_ids,
+            maximum_sequence_length=(
+                self.product_seq_len
+            ),
         )
 
-        return [
-            self._pad(a_tokens),
-            self._pad(b_tokens),
-            self._pad(p_tokens),
-            self._pad(target_tokens),
-        ]
+        self._check_sequence_length(
+            sequence_name="modular_result",
+            integer_value=(
+                modular_result_value
+            ),
+            token_ids=(
+                modular_result_token_ids
+            ),
+            maximum_sequence_length=(
+                self.modular_result_seq_len
+            ),
+        )
+
+        return {
+            "a": self._pad_token_ids_to_length(
+                token_ids=a_token_ids,
+                required_sequence_length=(
+                    self.operand_seq_len
+                ),
+            ),
+            "b": self._pad_token_ids_to_length(
+                token_ids=b_token_ids,
+                required_sequence_length=(
+                    self.operand_seq_len
+                ),
+            ),
+            "modulus": (
+                self._pad_token_ids_to_length(
+                    token_ids=modulus_token_ids,
+                    required_sequence_length=(
+                        self.modulus_seq_len
+                    ),
+                )
+            ),
+            "product": (
+                self._pad_token_ids_to_length(
+                    token_ids=product_token_ids,
+                    required_sequence_length=(
+                        self.product_seq_len
+                    ),
+                )
+            ),
+            "modular_result": (
+                self._pad_token_ids_to_length(
+                    token_ids=(
+                        modular_result_token_ids
+                    ),
+                    required_sequence_length=(
+                        self.modular_result_seq_len
+                    ),
+                )
+            ),
+        }
 
     def _check_sequence_length(
         self,
-        name: str,
-        value: int,
+        sequence_name: str,
+        integer_value: int,
         token_ids: list[int],
+        maximum_sequence_length: int,
     ) -> None:
-        if len(token_ids) > self.max_seq_len:
+        if (
+            len(token_ids)
+            > maximum_sequence_length
+        ):
             raise ValueError(
-                f"{name}={value} requires "
-                f"{len(token_ids)} tokens, but "
-                f"max_seq_len is {self.max_seq_len}."
+                f"{sequence_name}={integer_value} "
+                f"requires {len(token_ids)} tokens, "
+                f"but its maximum sequence length is "
+                f"{maximum_sequence_length}."
             )
 
-    def _pad(
+    def _pad_token_ids_to_length(
         self,
         token_ids: list[int],
+        required_sequence_length: int,
     ) -> list[int]:
         padding_length = (
-            self.max_seq_len
+            required_sequence_length
             - len(token_ids)
         )
 
@@ -611,11 +844,96 @@ class MultiplicationDataStream:
             * padding_length
         )
 
+    def _convert_encoded_samples_to_batch(
+        self,
+        encoded_samples: list[
+            dict[str, list[int]]
+        ],
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "a": torch.tensor(
+                [
+                    encoded_sample["a"]
+                    for encoded_sample
+                    in encoded_samples
+                ],
+                dtype=torch.long,
+            ),
+            "b": torch.tensor(
+                [
+                    encoded_sample["b"]
+                    for encoded_sample
+                    in encoded_samples
+                ],
+                dtype=torch.long,
+            ),
+            "modulus": torch.tensor(
+                [
+                    encoded_sample[
+                        "modulus"
+                    ]
+                    for encoded_sample
+                    in encoded_samples
+                ],
+                dtype=torch.long,
+            ),
+            "product": torch.tensor(
+                [
+                    encoded_sample[
+                        "product"
+                    ]
+                    for encoded_sample
+                    in encoded_samples
+                ],
+                dtype=torch.long,
+            ),
+            "modular_result": torch.tensor(
+                [
+                    encoded_sample[
+                        "modular_result"
+                    ]
+                    for encoded_sample
+                    in encoded_samples
+                ],
+                dtype=torch.long,
+            ),
+        }
+
+    def _create_tensor_dataset(
+        self,
+        encoded_samples: list[
+            dict[str, list[int]]
+        ],
+    ) -> MultiplicationModuloTensorDataset:
+        tensor_batch = (
+            self._convert_encoded_samples_to_batch(
+                encoded_samples
+            )
+        )
+
+        return MultiplicationModuloTensorDataset(
+            a_token_ids=tensor_batch["a"],
+            b_token_ids=tensor_batch["b"],
+            modulus_token_ids=(
+                tensor_batch["modulus"]
+            ),
+            product_token_ids=(
+                tensor_batch["product"]
+            ),
+            modular_result_token_ids=(
+                tensor_batch[
+                    "modular_result"
+                ]
+            ),
+        )
+
     def state_dict(self) -> dict:
         return {
             "step": self.step,
             "current_max": self.current_max,
-            "random_state": self.rng.getstate(),
+            "random_state": (
+                self.random_number_generator.getstate()
+            ),
         }
 
     def load_state_dict(
@@ -629,8 +947,7 @@ class MultiplicationDataStream:
         }
 
         missing_keys = (
-            required_keys
-            - state.keys()
+            required_keys - state.keys()
         )
 
         if missing_keys:
@@ -647,13 +964,16 @@ class MultiplicationDataStream:
             state["current_max"]
         )
 
-        self.rng.setstate(
+        self.random_number_generator.setstate(
             state["random_state"]
         )
 
     def reset(self) -> None:
         self.step = 0
         self.current_max = self.initial_max
-        self.rng = random.Random(
-            self.seed
+
+        self.random_number_generator = (
+            random.Random(
+                self.seed
+            )
         )
