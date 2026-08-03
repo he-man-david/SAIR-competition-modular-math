@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
@@ -371,11 +372,27 @@ def train_model(
     validation_interval: int,
     validation_steps: int,
     plot_interval: int,
+    checkpoint_name: str,
+    checkpoint_interval: int,
     gradient_clip_norm: float,
     use_bf16: bool,
 ) -> None:
     pad_id = tokenizer.char_to_int["<pad>"]
     eos_id = tokenizer.char_to_int["<eos>"]
+
+    checkpoint_name_path = Path(
+        checkpoint_name
+    )
+
+    checkpoint_file_stem = (
+        checkpoint_name_path.stem
+    )
+
+    checkpoint_file_suffix = (
+        checkpoint_name_path.suffix
+        if checkpoint_name_path.suffix
+        else ".pt"
+    )
 
     figure, axes = plt.subplots(
         2,
@@ -559,6 +576,26 @@ def train_model(
 
         if (
             training_history["global_step"]
+            % checkpoint_interval
+            == 0
+        ):
+            checkpoint_file_name = (
+                f"{checkpoint_file_stem}"
+                f"_step_"
+                f"{training_history['global_step']}"
+                f"{checkpoint_file_suffix}"
+            )
+
+            save_checkpoint(
+                file_name=checkpoint_file_name,
+                model=model,
+                optimizer=optimizer,
+                data_stream=data_stream,
+                training_history=training_history,
+            )
+
+        if (
+            training_history["global_step"]
             % plot_interval
             == 0
         ):
@@ -594,32 +631,27 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     data_stream,
     training_history: dict,
-    checkpoint_folder: str = "checkpoint",
+    checkpoint_dir: str | os.PathLike = (
+        "/teamspace/studios/this_studio/"
+        "SAIR-competition-modular-math/checkpoints"
+    ),
 ) -> None:
-    os.makedirs(
-        checkpoint_folder,
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(
+        parents=True,
         exist_ok=True,
     )
 
-    checkpoint_path = os.path.join(
-        checkpoint_folder,
-        file_name,
+    checkpoint_path = (
+        checkpoint_dir / file_name
     )
 
     torch.save(
         {
-            "model_state_dict": (
-                model.state_dict()
-            ),
-            "optimizer_state_dict": (
-                optimizer.state_dict()
-            ),
-            "data_stream_state_dict": (
-                data_stream.state_dict()
-            ),
-            "training_history": (
-                training_history
-            ),
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "data_stream_state_dict": data_stream.state_dict(),
+            "training_history": training_history,
         },
         checkpoint_path,
     )
@@ -638,11 +670,13 @@ def load_checkpoint(
     data_stream,
     training_history: dict,
     device: torch.device,
-    checkpoint_folder: str = "checkpoint",
+    checkpoint_dir: str | os.PathLike = (
+        "/teamspace/studios/this_studio/"
+        "SAIR-competition-modular-math/checkpoints"
+    ),
 ) -> None:
-    checkpoint_path = os.path.join(
-        checkpoint_folder,
-        file_name,
+    checkpoint_path = (
+        Path(checkpoint_dir) / file_name
     )
 
     checkpoint = torch.load(
@@ -664,7 +698,6 @@ def load_checkpoint(
     )
 
     training_history.clear()
-
     training_history.update(
         checkpoint["training_history"]
     )

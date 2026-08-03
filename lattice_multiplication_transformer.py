@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 
 class LatticeMultiplicationLoopTransformer(nn.Module):
@@ -216,7 +217,7 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
             0.0,
         )
 
-        lattice_features_for_convolution = torch.func.rearrange(
+        lattice_features_for_convolution = rearrange(
             lattice_cell_features,
             "batch row column features -> batch features row column",
         )
@@ -234,7 +235,7 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
             )
         )
 
-        convolved_lattice_features = torch.func.rearrange(
+        convolved_lattice_features = rearrange(
             convolved_lattice_features,
             "batch features row column -> batch row column features",
         )
@@ -256,7 +257,7 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
             )
         )
 
-        column_position_encoding = torch.func.rearrange(
+        column_position_encoding = rearrange(
             column_position_encoding,
             "column features -> 1 1 column features",
         )
@@ -323,13 +324,13 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
                 )
             )
 
-            current_lattice_row_group_sequence = torch.func.rearrange(
+            current_lattice_row_group_sequence = rearrange(
                 current_lattice_row_group,
                 "batch row column features -> batch (row column) features",
             )
 
             current_lattice_row_group_padding_mask = (
-                ~torch.func.rearrange(
+                ~rearrange(
                     current_lattice_row_group_validity_mask,
                     "batch row column -> batch (row column)",
                 )
