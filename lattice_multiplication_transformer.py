@@ -49,7 +49,7 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
 
         self.lattice_cell_mlp = nn.Sequential(
             nn.Linear(
-                3 * d_model + 1,
+                d_model + 1,
                 self.transformer_dim,
             ),
             nn.SiLU(),
@@ -162,50 +162,36 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
             0.0,
         )
 
-        a_grid = embedded_a.unsqueeze(2).expand(
-            -1,
-            -1,
-            seq_len,
-            -1,
+        pairwise_elementwise_products = (
+            embedded_a.unsqueeze(2)
+            * embedded_b.unsqueeze(1)
         )
 
-        b_grid = embedded_b.unsqueeze(1).expand(
-            -1,
-            seq_len,
-            -1,
-            -1,
+        transformed_a = self.bilinear_w(
+            embedded_a
         )
 
-        transformed_a_grid = self.bilinear_w(
-            a_grid
+        embedded_b_for_bilinear_scores = rearrange(
+            embedded_b,
+            "batch column features -> batch features column",
         )
+
+        bilinear_scores = torch.bmm(
+            transformed_a,
+            embedded_b_for_bilinear_scores,
+        ).unsqueeze(-1)
 
         bilinear_scores = (
-            transformed_a_grid
-            * b_grid
-        ).sum(
-            dim=-1,
-            keepdim=True,
-        ) / math.sqrt(self.d_model)
-
-        bilinear_scores = bilinear_scores.masked_fill(
-            ~pair_validity_mask.unsqueeze(-1),
-            0.0,
+            bilinear_scores
+            / math.sqrt(self.d_model)
         )
 
         pair_features = torch.cat(
             [
-                a_grid,
-                b_grid,
-                a_grid * b_grid,
+                pairwise_elementwise_products,
                 bilinear_scores,
             ],
             dim=-1,
-        )
-
-        pair_features = pair_features.masked_fill(
-            ~pair_validity_mask.unsqueeze(-1),
-            0.0,
         )
 
         lattice_cell_features = self.lattice_cell_mlp(
@@ -370,13 +356,17 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
 
             encoded_lattice_row_group = self.encoder(
                 src=current_lattice_row_group_sequence,
-                src_key_padding_mask=transformer_safe_padding_mask,
+                src_key_padding_mask=(
+                    transformer_safe_padding_mask
+                ),
             )
 
             updated_product_state = self.decoder(
                 tgt=product_state,
                 memory=encoded_lattice_row_group,
-                memory_key_padding_mask=transformer_safe_padding_mask,
+                memory_key_padding_mask=(
+                    transformer_safe_padding_mask
+                ),
             )
 
             product_state = torch.where(
@@ -400,7 +390,6 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
         b: torch.Tensor,
     ) -> torch.Tensor:
         was_training = self.training
-
         self.eval()
 
         predictions = self.forward(
