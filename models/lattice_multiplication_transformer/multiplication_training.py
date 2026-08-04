@@ -9,7 +9,10 @@ from IPython.display import display
 from matplotlib.ticker import MaxNLocator
 from tqdm.auto import tqdm
 
-from data_streams.multiplication_data_stream import MultiplicationDataStream
+from data_streams.multiplication_data_stream import (
+    MultiplicationDataStream,
+)
+
 from tokenizer import DigitTokenizer
 
 
