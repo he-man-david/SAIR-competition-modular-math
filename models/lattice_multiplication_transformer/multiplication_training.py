@@ -9,10 +9,7 @@ from IPython.display import display
 from matplotlib.ticker import MaxNLocator
 from tqdm.auto import tqdm
 
-from data_streams.multiplication_data_stream import (
-    MultiplicationDataStream,
-)
-
+from data_streams.multiplication_data_stream import MultiplicationDataStream
 from tokenizer import DigitTokenizer
 
 
@@ -63,14 +60,10 @@ def truncate_predictions_after_eos(
     first_eos_position = eos_positions.int().argmax(dim=1)
 
     positions_after_eos = (
-        sequence_positions
-        > first_eos_position.unsqueeze(1)
+        sequence_positions > first_eos_position.unsqueeze(1)
     ) & sequence_has_eos.unsqueeze(1)
 
-    return predictions.masked_fill(
-        positions_after_eos,
-        pad_id,
-    )
+    return predictions.masked_fill(positions_after_eos, pad_id)
 
 
 def compute_product_accuracies(
@@ -104,6 +97,42 @@ def compute_product_accuracies(
     )
 
 
+def _crop_batch_to_length_bucket(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    product_targets: torch.Tensor,
+    pad_id: int,
+    length_buckets: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    longest_operand_length = max(
+        int((a != pad_id).sum(dim=1).max().item()),
+        int((b != pad_id).sum(dim=1).max().item()),
+    )
+
+    bucket_length = next(
+        (
+            bucket_length
+            for bucket_length in length_buckets
+            if bucket_length >= longest_operand_length
+        ),
+        None,
+    )
+
+    if bucket_length is None:
+        raise ValueError(
+            "No length bucket can fit an operand of length "
+            f"{longest_operand_length}."
+        )
+
+    product_sequence_length = 2 * bucket_length + 1
+
+    return (
+        a[:, :bucket_length],
+        b[:, :bucket_length],
+        product_targets[:, :product_sequence_length],
+    )
+
+
 @torch.no_grad()
 def validate_model(
     model: nn.Module,
@@ -113,6 +142,7 @@ def validate_model(
     device: torch.device,
     validation_steps: int,
     validation_lookahead_steps: int,
+    length_buckets: tuple[int, ...],
     use_bf16: bool,
 ) -> dict[str, float]:
     model_was_training = model.training
@@ -121,39 +151,38 @@ def validate_model(
     pad_id = tokenizer.char_to_int["<pad>"]
     eos_id = tokenizer.char_to_int["<eos>"]
 
-    validation_loader = (
-        data_stream.create_validation_chunk_loader(
-            num_steps=validation_steps,
-            lookahead_steps=validation_lookahead_steps,
-            batch_size=data_stream.batch_size,
-            seed=10_000,
-        )
+    _validate_length_buckets(
+        length_buckets=length_buckets,
+        maximum_operand_length=data_stream.operand_seq_len,
+    )
+
+    validation_loader = data_stream.create_validation_chunk_loader(
+        num_steps=validation_steps,
+        lookahead_steps=validation_lookahead_steps,
+        batch_size=data_stream.batch_size,
+        seed=10_000,
     )
 
     validation_loss_weighted_sum = 0.0
     validation_target_token_count = 0
-
     exact_correct_count = 0
     sequence_count = 0
-
     token_correct_count = 0
     token_count = 0
 
     try:
         for validation_batch in validation_loader:
-            a = validation_batch["a"].to(
-                device,
-                non_blocking=True,
+            a, b, product_targets = _crop_batch_to_length_bucket(
+                a=validation_batch["a"],
+                b=validation_batch["b"],
+                product_targets=validation_batch["product"],
+                pad_id=pad_id,
+                length_buckets=length_buckets,
             )
 
-            b = validation_batch["b"].to(
-                device,
-                non_blocking=True,
-            )
-
-            product_targets = validation_batch[
-                "product"
-            ].to(
+            a = a.to(device, non_blocking=True)
+            b = b.to(device, non_blocking=True)
+            product_targets = product_targets.to(
                 device,
                 non_blocking=True,
             )
@@ -163,16 +192,9 @@ def validate_model(
                 dtype=torch.bfloat16,
                 enabled=use_bf16,
             ):
-                product_logits = model(
-                    a,
-                    b,
-                )
-
+                product_logits = model(a, b)
                 validation_loss = loss_function(
-                    product_logits.reshape(
-                        -1,
-                        tokenizer.vocab_size,
-                    ),
+                    product_logits.reshape(-1, tokenizer.vocab_size),
                     product_targets.reshape(-1),
                 )
 
@@ -182,56 +204,27 @@ def validate_model(
                 batch_token_correct_count,
                 batch_token_count,
             ) = compute_product_accuracies(
-                product_predictions=(
-                    product_logits.argmax(dim=-1)
-                ),
+                product_predictions=product_logits.argmax(dim=-1),
                 product_targets=product_targets,
                 eos_id=eos_id,
                 pad_id=pad_id,
             )
 
             validation_loss_weighted_sum += (
-                validation_loss.item()
-                * batch_token_count
+                validation_loss.item() * batch_token_count
             )
-
-            validation_target_token_count += (
-                batch_token_count
-            )
-
-            exact_correct_count += (
-                batch_exact_correct_count
-            )
-
-            sequence_count += (
-                batch_sequence_count
-            )
-
-            token_correct_count += (
-                batch_token_correct_count
-            )
-
-            token_count += (
-                batch_token_count
-            )
+            validation_target_token_count += batch_token_count
+            exact_correct_count += batch_exact_correct_count
+            sequence_count += batch_sequence_count
+            token_correct_count += batch_token_correct_count
+            token_count += batch_token_count
     finally:
-        model.train(
-            model_was_training
-        )
+        model.train(model_was_training)
 
     return {
-        "loss": (
-            validation_loss_weighted_sum
-            / validation_target_token_count
-        ),
-        "exact_accuracy": (
-            exact_correct_count
-            / sequence_count
-        ),
-        "token_accuracy": (
-            token_correct_count
-            / token_count
-        ),
+        "loss": validation_loss_weighted_sum / validation_target_token_count,
+        "exact_accuracy": exact_correct_count / sequence_count,
+        "token_accuracy": token_correct_count / token_count,
     }
 
 
@@ -242,10 +235,7 @@ def plot_training_history(
     if not training_history["train_step"]:
         return display_handle
 
-    figure, (
-        loss_axis,
-        accuracy_axis,
-    ) = plt.subplots(
+    figure, (loss_axis, accuracy_axis) = plt.subplots(
         2,
         1,
         figsize=(14, 10),
@@ -273,38 +263,24 @@ def plot_training_history(
 
     accuracy_axis.plot(
         training_history["train_step"],
-        training_history[
-            "train_exact_accuracy"
-        ],
-        label=(
-            "Training exact accuracy "
-            "(logged batch)"
-        ),
+        training_history["train_exact_accuracy"],
+        label="Training exact accuracy (logged batch)",
         linewidth=2,
         linestyle="-",
     )
 
     accuracy_axis.plot(
         training_history["train_step"],
-        training_history[
-            "train_token_accuracy"
-        ],
-        label=(
-            "Training token accuracy "
-            "(logged batch)"
-        ),
+        training_history["train_token_accuracy"],
+        label="Training token accuracy (logged batch)",
         linewidth=2,
         linestyle="-",
     )
 
-    if training_history[
-        "validation_exact_accuracy"
-    ]:
+    if training_history["validation_exact_accuracy"]:
         accuracy_axis.plot(
             training_history["validation_step"],
-            training_history[
-                "validation_exact_accuracy"
-            ],
+            training_history["validation_exact_accuracy"],
             label="Validation exact accuracy",
             linewidth=2,
             linestyle="--",
@@ -314,9 +290,7 @@ def plot_training_history(
 
         accuracy_axis.plot(
             training_history["validation_step"],
-            training_history[
-                "validation_token_accuracy"
-            ],
+            training_history["validation_token_accuracy"],
             label="Validation token accuracy",
             linewidth=2,
             linestyle="--",
@@ -324,65 +298,28 @@ def plot_training_history(
             markersize=4,
         )
 
-    loss_axis.set_title(
-        "Lattice Multiplication Training"
-    )
+    loss_axis.set_title("Lattice Multiplication Training")
+    loss_axis.set_ylabel("Cross-entropy loss")
 
-    loss_axis.set_ylabel(
-        "Cross-entropy loss"
-    )
+    accuracy_axis.set_xlabel("Training step")
+    accuracy_axis.set_ylabel("Accuracy")
+    accuracy_axis.set_ylim(0.0, 1.0)
+    accuracy_axis.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    accuracy_axis.set_xlabel(
-        "Training step"
-    )
+    loss_axis.legend(loc="upper right")
+    accuracy_axis.legend(loc="lower right")
 
-    accuracy_axis.set_ylabel(
-        "Accuracy"
-    )
-
-    accuracy_axis.set_ylim(
-        0.0,
-        1.0,
-    )
-
-    accuracy_axis.xaxis.set_major_locator(
-        MaxNLocator(
-            integer=True
-        )
-    )
-
-    loss_axis.legend(
-        loc="upper right"
-    )
-
-    accuracy_axis.legend(
-        loc="lower right"
-    )
-
-    loss_axis.grid(
-        alpha=0.3
-    )
-
-    accuracy_axis.grid(
-        alpha=0.3
-    )
+    loss_axis.grid(alpha=0.3)
+    accuracy_axis.grid(alpha=0.3)
 
     figure.tight_layout()
 
     if display_handle is None:
-        display_handle = display(
-            figure,
-            display_id=True,
-        )
+        display_handle = display(figure, display_id=True)
     else:
-        display_handle.update(
-            figure
-        )
+        display_handle.update(figure)
 
-    plt.close(
-        figure
-    )
-
+    plt.close(figure)
     return display_handle
 
 
@@ -403,61 +340,42 @@ def train_model(
     checkpoint_name: str,
     checkpoint_interval: int,
     gradient_clip_norm: float,
+    length_buckets: tuple[int, ...],
     use_bf16: bool,
-    checkpoint_dir: str | os.PathLike = (
-        DEFAULT_CHECKPOINT_DIR
-    ),
+    checkpoint_dir: str | os.PathLike = DEFAULT_CHECKPOINT_DIR,
 ) -> None:
     _validate_training_configuration(
         steps=steps,
         log_interval=log_interval,
-        validation_interval=(
-            validation_interval
-        ),
+        validation_interval=validation_interval,
         validation_steps=validation_steps,
-        validation_lookahead_steps=(
-            validation_lookahead_steps
-        ),
+        validation_lookahead_steps=validation_lookahead_steps,
         plot_interval=plot_interval,
-        checkpoint_interval=(
-            checkpoint_interval
-        ),
-        gradient_clip_norm=(
-            gradient_clip_norm
-        ),
+        checkpoint_interval=checkpoint_interval,
+        gradient_clip_norm=gradient_clip_norm,
     )
 
-    pad_id = tokenizer.char_to_int[
-        "<pad>"
-    ]
+    _validate_length_buckets(
+        length_buckets=length_buckets,
+        maximum_operand_length=data_stream.operand_seq_len,
+    )
 
-    eos_id = tokenizer.char_to_int[
-        "<eos>"
-    ]
+    pad_id = tokenizer.char_to_int["<pad>"]
+    eos_id = tokenizer.char_to_int["<eos>"]
 
-    (
-        checkpoint_file_stem,
-        checkpoint_file_suffix,
-    ) = _split_checkpoint_name(
+    checkpoint_file_stem, checkpoint_file_suffix = _split_checkpoint_name(
         checkpoint_name
     )
 
-    running_training_loss_sum = (
-        torch.zeros(
-            (),
-            device=device,
-            dtype=torch.float32,
-        )
+    running_training_loss_sum = torch.zeros(
+        (),
+        device=device,
+        dtype=torch.float32,
     )
-
     running_training_step_count = 0
 
     display_handle = None
-
-    last_plotted_history_size = (
-        0,
-        0,
-    )
+    last_plotted_history_size = (0, 0)
 
     progress_bar = tqdm(
         range(steps),
@@ -467,46 +385,33 @@ def train_model(
     for training_iteration in progress_bar:
         model.train()
 
-        training_batch = (
-            data_stream.next_batch()
+        training_batch = data_stream.next_batch()
+
+        a, b, product_targets = _crop_batch_to_length_bucket(
+            a=training_batch["a"],
+            b=training_batch["b"],
+            product_targets=training_batch["product"],
+            pad_id=pad_id,
+            length_buckets=length_buckets,
         )
 
-        a = training_batch["a"].to(
+        a = a.to(device, non_blocking=True)
+        b = b.to(device, non_blocking=True)
+        product_targets = product_targets.to(
             device,
             non_blocking=True,
         )
 
-        b = training_batch["b"].to(
-            device,
-            non_blocking=True,
-        )
-
-        product_targets = training_batch[
-            "product"
-        ].to(
-            device,
-            non_blocking=True,
-        )
-
-        optimizer.zero_grad(
-            set_to_none=True
-        )
+        optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(
             device_type=device.type,
             dtype=torch.bfloat16,
             enabled=use_bf16,
         ):
-            product_logits = model(
-                a,
-                b,
-            )
-
+            product_logits = model(a, b)
             training_loss = loss_function(
-                product_logits.reshape(
-                    -1,
-                    tokenizer.vocab_size,
-                ),
+                product_logits.reshape(-1, tokenizer.vocab_size),
                 product_targets.reshape(-1),
             )
 
@@ -519,18 +424,10 @@ def train_model(
 
         optimizer.step()
 
-        training_history[
-            "global_step"
-        ] += 1
+        training_history["global_step"] += 1
+        global_step = training_history["global_step"]
 
-        global_step = training_history[
-            "global_step"
-        ]
-
-        running_training_loss_sum += (
-            training_loss.detach().float()
-        )
-
+        running_training_loss_sum += training_loss.detach().float()
         running_training_step_count += 1
 
         should_log = (
@@ -544,21 +441,11 @@ def train_model(
                 logged_exact_accuracy,
                 logged_token_accuracy,
             ) = _append_training_log(
-                training_history=(
-                    training_history
-                ),
-                running_training_loss_sum=(
-                    running_training_loss_sum
-                ),
-                running_training_step_count=(
-                    running_training_step_count
-                ),
-                product_logits=(
-                    product_logits.detach()
-                ),
-                product_targets=(
-                    product_targets
-                ),
+                training_history=training_history,
+                running_training_loss_sum=running_training_loss_sum,
+                running_training_step_count=running_training_step_count,
+                product_logits=product_logits.detach(),
+                product_targets=product_targets,
                 eos_id=eos_id,
                 pad_id=pad_id,
             )
@@ -568,75 +455,40 @@ def train_model(
 
             progress_bar.set_postfix(
                 loss=f"{logged_loss:.4f}",
-                exact=(
-                    f"{logged_exact_accuracy:.4f}"
-                ),
-                token=(
-                    f"{logged_token_accuracy:.4f}"
-                ),
+                exact=f"{logged_exact_accuracy:.4f}",
+                token=f"{logged_token_accuracy:.4f}",
                 max_product=(
                     f"{data_stream.current_max_product_value:.2f}"
                 ),
             )
 
-        if (
-            global_step
-            % validation_interval
-            == 0
-        ):
-            validation_metrics = (
-                validate_model(
-                    model=model,
-                    data_stream=data_stream,
-                    loss_function=loss_function,
-                    tokenizer=tokenizer,
-                    device=device,
-                    validation_steps=(
-                        validation_steps
-                    ),
-                    validation_lookahead_steps=(
-                        validation_lookahead_steps
-                    ),
-                    use_bf16=use_bf16,
-                )
+        if global_step % validation_interval == 0:
+            validation_metrics = validate_model(
+                model=model,
+                data_stream=data_stream,
+                loss_function=loss_function,
+                tokenizer=tokenizer,
+                device=device,
+                validation_steps=validation_steps,
+                validation_lookahead_steps=validation_lookahead_steps,
+                length_buckets=length_buckets,
+                use_bf16=use_bf16,
             )
 
-            training_history[
-                "validation_step"
-            ].append(
-                global_step
-            )
-
-            training_history[
-                "validation_loss"
-            ].append(
+            training_history["validation_step"].append(global_step)
+            training_history["validation_loss"].append(
                 validation_metrics["loss"]
             )
-
-            training_history[
-                "validation_exact_accuracy"
-            ].append(
-                validation_metrics[
-                    "exact_accuracy"
-                ]
+            training_history["validation_exact_accuracy"].append(
+                validation_metrics["exact_accuracy"]
+            )
+            training_history["validation_token_accuracy"].append(
+                validation_metrics["token_accuracy"]
             )
 
-            training_history[
-                "validation_token_accuracy"
-            ].append(
-                validation_metrics[
-                    "token_accuracy"
-                ]
-            )
-
-        if (
-            global_step
-            % checkpoint_interval
-            == 0
-        ):
+        if global_step % checkpoint_interval == 0:
             checkpoint_file_name = (
-                f"{global_step}_"
-                f"{checkpoint_file_stem}"
+                f"{global_step}_{checkpoint_file_stem}"
                 f"{checkpoint_file_suffix}"
             )
 
@@ -645,95 +497,43 @@ def train_model(
                 model=model,
                 optimizer=optimizer,
                 data_stream=data_stream,
-                training_history=(
-                    training_history
-                ),
+                training_history=training_history,
                 checkpoint_dir=checkpoint_dir,
                 training_configuration={
-                    "log_interval": (
-                        log_interval
-                    ),
-                    "validation_interval": (
-                        validation_interval
-                    ),
-                    "validation_steps": (
-                        validation_steps
-                    ),
+                    "log_interval": log_interval,
+                    "validation_interval": validation_interval,
+                    "validation_steps": validation_steps,
                     "validation_lookahead_steps": (
                         validation_lookahead_steps
                     ),
-                    "plot_interval": (
-                        plot_interval
-                    ),
-                    "checkpoint_name": (
-                        checkpoint_name
-                    ),
-                    "checkpoint_interval": (
-                        checkpoint_interval
-                    ),
-                    "gradient_clip_norm": (
-                        gradient_clip_norm
-                    ),
-                    "use_bf16": (
-                        use_bf16
-                    ),
+                    "plot_interval": plot_interval,
+                    "checkpoint_name": checkpoint_name,
+                    "checkpoint_interval": checkpoint_interval,
+                    "gradient_clip_norm": gradient_clip_norm,
+                    "length_buckets": length_buckets,
+                    "use_bf16": use_bf16,
                 },
             )
 
-        if (
-            global_step
-            % plot_interval
-            == 0
-        ):
+        if global_step % plot_interval == 0:
             current_history_size = (
-                len(
-                    training_history[
-                        "train_step"
-                    ]
-                ),
-                len(
-                    training_history[
-                        "validation_step"
-                    ]
-                ),
+                len(training_history["train_step"]),
+                len(training_history["validation_step"]),
             )
 
-            if (
-                current_history_size
-                != last_plotted_history_size
-            ):
-                display_handle = (
-                    plot_training_history(
-                        training_history=(
-                            training_history
-                        ),
-                        display_handle=(
-                            display_handle
-                        ),
-                    )
+            if current_history_size != last_plotted_history_size:
+                display_handle = plot_training_history(
+                    training_history=training_history,
+                    display_handle=display_handle,
                 )
-
-                last_plotted_history_size = (
-                    current_history_size
-                )
+                last_plotted_history_size = current_history_size
 
     final_history_size = (
-        len(
-            training_history[
-                "train_step"
-            ]
-        ),
-        len(
-            training_history[
-                "validation_step"
-            ]
-        ),
+        len(training_history["train_step"]),
+        len(training_history["validation_step"]),
     )
 
-    if (
-        final_history_size
-        != last_plotted_history_size
-    ):
+    if final_history_size != last_plotted_history_size:
         plot_training_history(
             training_history=training_history,
             display_handle=display_handle,
@@ -746,53 +546,27 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     data_stream: MultiplicationDataStream,
     training_history: TrainingHistory,
-    checkpoint_dir: str | os.PathLike = (
-        DEFAULT_CHECKPOINT_DIR
-    ),
+    checkpoint_dir: str | os.PathLike = DEFAULT_CHECKPOINT_DIR,
     training_configuration: dict | None = None,
 ) -> None:
-    checkpoint_directory = Path(
-        checkpoint_dir
-    )
-
-    checkpoint_directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    checkpoint_path = (
-        checkpoint_directory
-        / file_name
-    )
+    checkpoint_directory = Path(checkpoint_dir)
+    checkpoint_directory.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_directory / file_name
 
     torch.save(
         {
             "checkpoint_version": 1,
-            "runtime_metadata": (
-                _runtime_metadata(
-                    model=model,
-                    optimizer=optimizer,
-                    data_stream=data_stream,
-                )
+            "runtime_metadata": _runtime_metadata(
+                model=model,
+                optimizer=optimizer,
+                data_stream=data_stream,
             ),
-            "model_state_dict": (
-                model.state_dict()
-            ),
-            "optimizer_state_dict": (
-                optimizer.state_dict()
-            ),
-            "data_stream_state_dict": (
-                data_stream.state_dict()
-            ),
-            "training_history": (
-                training_history
-            ),
-            "training_configuration": (
-                training_configuration
-            ),
-            "torch_cpu_rng_state": (
-                torch.get_rng_state()
-            ),
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "data_stream_state_dict": data_stream.state_dict(),
+            "training_history": training_history,
+            "training_configuration": training_configuration,
+            "torch_cpu_rng_state": torch.get_rng_state(),
             "torch_cuda_rng_states": (
                 torch.cuda.get_rng_state_all()
                 if torch.cuda.is_available()
@@ -816,14 +590,9 @@ def load_checkpoint(
     data_stream: MultiplicationDataStream,
     training_history: TrainingHistory,
     device: torch.device,
-    checkpoint_dir: str | os.PathLike = (
-        DEFAULT_CHECKPOINT_DIR
-    ),
+    checkpoint_dir: str | os.PathLike = DEFAULT_CHECKPOINT_DIR,
 ) -> None:
-    checkpoint_path = (
-        Path(checkpoint_dir)
-        / file_name
-    )
+    checkpoint_path = Path(checkpoint_dir) / file_name
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -843,87 +612,44 @@ def load_checkpoint(
         "torch_cuda_rng_states",
     }
 
-    missing_checkpoint_keys = (
-        required_checkpoint_keys
-        - checkpoint.keys()
-    )
-
+    missing_checkpoint_keys = required_checkpoint_keys - checkpoint.keys()
     if missing_checkpoint_keys:
         raise KeyError(
             "Missing checkpoint keys: "
             f"{sorted(missing_checkpoint_keys)}"
         )
 
-    if (
-        checkpoint["checkpoint_version"]
-        != 1
-    ):
+    if checkpoint["checkpoint_version"] != 1:
         raise ValueError(
             "Unsupported checkpoint version: "
             f"{checkpoint['checkpoint_version']}."
         )
 
-    saved_runtime_metadata = checkpoint[
-        "runtime_metadata"
-    ]
-
-    current_runtime_metadata = (
-        _runtime_metadata(
-            model=model,
-            optimizer=optimizer,
-            data_stream=data_stream,
-        )
+    saved_runtime_metadata = checkpoint["runtime_metadata"]
+    current_runtime_metadata = _runtime_metadata(
+        model=model,
+        optimizer=optimizer,
+        data_stream=data_stream,
     )
 
     _validate_runtime_metadata(
-        saved_runtime_metadata=(
-            saved_runtime_metadata
-        ),
-        current_runtime_metadata=(
-            current_runtime_metadata
-        ),
+        saved_runtime_metadata=saved_runtime_metadata,
+        current_runtime_metadata=current_runtime_metadata,
     )
 
-    model.load_state_dict(
-        checkpoint["model_state_dict"]
-    )
-
-    optimizer.load_state_dict(
-        checkpoint["optimizer_state_dict"]
-    )
-
-    data_stream.load_state_dict(
-        checkpoint[
-            "data_stream_state_dict"
-        ]
-    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    data_stream.load_state_dict(checkpoint["data_stream_state_dict"])
 
     training_history.clear()
+    training_history.update(checkpoint["training_history"])
 
-    training_history.update(
-        checkpoint["training_history"]
-    )
+    torch.set_rng_state(checkpoint["torch_cpu_rng_state"].cpu())
 
-    torch.set_rng_state(
-        checkpoint[
-            "torch_cpu_rng_state"
-        ].cpu()
-    )
-
-    saved_cuda_rng_states = checkpoint[
-        "torch_cuda_rng_states"
-    ]
-
-    if (
-        torch.cuda.is_available()
-        and saved_cuda_rng_states is not None
-    ):
+    saved_cuda_rng_states = checkpoint["torch_cuda_rng_states"]
+    if torch.cuda.is_available() and saved_cuda_rng_states is not None:
         torch.cuda.set_rng_state_all(
-            [
-                rng_state.cpu()
-                for rng_state
-                in saved_cuda_rng_states
-            ]
+            [rng_state.cpu() for rng_state in saved_cuda_rng_states]
         )
 
     print(
@@ -941,78 +667,53 @@ def evaluate_model(
     device: torch.device,
     max_product_value: int,
     number_of_samples: int,
+    length_buckets: tuple[int, ...],
     use_bf16: bool,
 ) -> None:
     model_was_training = model.training
     model.eval()
 
-    pad_id = tokenizer.char_to_int[
-        "<pad>"
-    ]
+    pad_id = tokenizer.char_to_int["<pad>"]
+    eos_id = tokenizer.char_to_int["<eos>"]
 
-    eos_id = tokenizer.char_to_int[
-        "<eos>"
-    ]
+    _validate_length_buckets(
+        length_buckets=length_buckets,
+        maximum_operand_length=data_stream.operand_seq_len,
+    )
 
-    evaluation_loader = (
-        data_stream.create_fixed_loader(
-            num_samples=number_of_samples,
-            max_product_value=(
-                max_product_value
-            ),
-            batch_size=(
-                data_stream.batch_size
-            ),
-            seed=42,
-        )
+    evaluation_loader = data_stream.create_fixed_loader(
+        num_samples=number_of_samples,
+        max_product_value=max_product_value,
+        batch_size=data_stream.batch_size,
+        seed=42,
     )
 
     exact_correct_count = 0
     sequence_count = 0
-
-    wrong_predictions: list[
-        tuple[
-            str,
-            str,
-            str,
-            str,
-        ]
-    ] = []
+    wrong_predictions: list[tuple[str, str, str, str]] = []
 
     try:
         for evaluation_batch in tqdm(
             evaluation_loader,
             desc="Evaluating multiplication",
         ):
-            a_token_ids = evaluation_batch[
-                "a"
-            ]
-
-            b_token_ids = evaluation_batch[
-                "b"
-            ]
-
-            product_target_token_ids = (
-                evaluation_batch[
-                    "product"
-                ]
+            (
+                a_token_ids,
+                b_token_ids,
+                product_target_token_ids,
+            ) = _crop_batch_to_length_bucket(
+                a=evaluation_batch["a"],
+                b=evaluation_batch["b"],
+                product_targets=evaluation_batch["product"],
+                pad_id=pad_id,
+                length_buckets=length_buckets,
             )
 
-            a = a_token_ids.to(
+            a = a_token_ids.to(device, non_blocking=True)
+            b = b_token_ids.to(device, non_blocking=True)
+            product_targets = product_target_token_ids.to(
                 device,
                 non_blocking=True,
-            )
-
-            b = b_token_ids.to(
-                device,
-                non_blocking=True,
-            )
-
-            product_targets = (
-                product_target_token_ids.to(
-                    device,
-                    non_blocking=True,
-                )
             )
 
             with torch.autocast(
@@ -1020,120 +721,68 @@ def evaluate_model(
                 dtype=torch.bfloat16,
                 enabled=use_bf16,
             ):
-                product_logits = model(
-                    a,
-                    b,
-                )
+                product_logits = model(a, b)
 
-            product_predictions = (
-                truncate_predictions_after_eos(
-                    predictions=(
-                        product_logits.argmax(
-                            dim=-1
-                        )
-                    ),
-                    eos_id=eos_id,
-                    pad_id=pad_id,
-                )
+            product_predictions = truncate_predictions_after_eos(
+                predictions=product_logits.argmax(dim=-1),
+                eos_id=eos_id,
+                pad_id=pad_id,
             )
 
             correct_sequences = (
-                (
-                    product_predictions
-                    == product_targets
-                )
-                | (
-                    product_targets
-                    == pad_id
-                )
-            ).all(
-                dim=1
-            )
+                (product_predictions == product_targets)
+                | (product_targets == pad_id)
+            ).all(dim=1)
 
-            exact_correct_count += (
-                correct_sequences.sum().item()
-            )
-
-            sequence_count += (
-                product_targets.shape[0]
-            )
+            exact_correct_count += correct_sequences.sum().item()
+            sequence_count += product_targets.shape[0]
 
             if len(wrong_predictions) < 10:
-                product_predictions_cpu = (
-                    product_predictions.cpu()
-                )
+                product_predictions_cpu = product_predictions.cpu()
+                correct_sequences_cpu = correct_sequences.cpu()
 
-                correct_sequences_cpu = (
-                    correct_sequences.cpu()
-                )
-
-                for sample_index in range(
-                    correct_sequences_cpu.shape[0]
-                ):
-                    if correct_sequences_cpu[
-                        sample_index
-                    ].item():
+                for sample_index in range(correct_sequences_cpu.shape[0]):
+                    if correct_sequences_cpu[sample_index].item():
                         continue
 
                     wrong_predictions.append(
                         (
                             _decode_reversed_number(
-                                a_token_ids[
-                                    sample_index
-                                ],
+                                a_token_ids[sample_index],
                                 tokenizer,
                             ),
                             _decode_reversed_number(
-                                b_token_ids[
-                                    sample_index
-                                ],
+                                b_token_ids[sample_index],
                                 tokenizer,
                             ),
                             _decode_reversed_number(
-                                product_target_token_ids[
-                                    sample_index
-                                ],
+                                product_target_token_ids[sample_index],
                                 tokenizer,
                             ),
                             _decode_reversed_number(
-                                product_predictions_cpu[
-                                    sample_index
-                                ],
+                                product_predictions_cpu[sample_index],
                                 tokenizer,
                             ),
                         )
                     )
 
-                    if (
-                        len(wrong_predictions)
-                        == 10
-                    ):
+                    if len(wrong_predictions) == 10:
                         break
     finally:
-        model.train(
-            model_was_training
-        )
+        model.train(model_was_training)
 
-    accuracy = (
-        exact_correct_count
-        / sequence_count
-    )
+    accuracy = exact_correct_count / sequence_count
 
     print(
         f"Accuracy: {accuracy:.6f} "
-        f"({exact_correct_count:,}/"
-        f"{sequence_count:,})"
+        f"({exact_correct_count:,}/{sequence_count:,})"
     )
 
     if not wrong_predictions:
-        print(
-            "\nNo wrong predictions."
-        )
+        print("\nNo wrong predictions.")
         return
 
-    print(
-        "\nWrong predictions:"
-    )
+    print("\nWrong predictions:")
 
     for (
         a_text,
@@ -1141,15 +790,8 @@ def evaluate_model(
         expected_product_text,
         predicted_product_text,
     ) in wrong_predictions:
-        print(
-            f"\n{a_text} × {b_text} "
-            f"= {expected_product_text}"
-        )
-
-        print(
-            "Prediction:",
-            predicted_product_text,
-        )
+        print(f"\n{a_text} × {b_text} = {expected_product_text}")
+        print("Prediction:", predicted_product_text)
 
 
 def _append_training_log(
@@ -1162,8 +804,7 @@ def _append_training_log(
     pad_id: int,
 ) -> tuple[float, float, float]:
     average_training_loss = (
-        running_training_loss_sum
-        / running_training_step_count
+        running_training_loss_sum / running_training_step_count
     ).item()
 
     (
@@ -1172,90 +813,41 @@ def _append_training_log(
         token_correct_count,
         token_count,
     ) = compute_product_accuracies(
-        product_predictions=(
-            product_logits.argmax(dim=-1)
-        ),
+        product_predictions=product_logits.argmax(dim=-1),
         product_targets=product_targets,
         eos_id=eos_id,
         pad_id=pad_id,
     )
 
-    exact_accuracy = (
-        exact_correct_count
-        / sequence_count
-    )
+    exact_accuracy = exact_correct_count / sequence_count
+    token_accuracy = token_correct_count / token_count
 
-    token_accuracy = (
-        token_correct_count
-        / token_count
-    )
-
-    training_history[
-        "train_step"
-    ].append(
+    training_history["train_step"].append(
         training_history["global_step"]
     )
+    training_history["train_loss"].append(average_training_loss)
+    training_history["train_exact_accuracy"].append(exact_accuracy)
+    training_history["train_token_accuracy"].append(token_accuracy)
 
-    training_history[
-        "train_loss"
-    ].append(
-        average_training_loss
-    )
-
-    training_history[
-        "train_exact_accuracy"
-    ].append(
-        exact_accuracy
-    )
-
-    training_history[
-        "train_token_accuracy"
-    ].append(
-        token_accuracy
-    )
-
-    return (
-        average_training_loss,
-        exact_accuracy,
-        token_accuracy,
-    )
+    return average_training_loss, exact_accuracy, token_accuracy
 
 
 def _decode_reversed_number(
     token_ids: torch.Tensor,
     tokenizer: DigitTokenizer,
 ) -> str:
-    return tokenizer.decode(
-        token_ids.tolist()
-    )[::-1]
+    return tokenizer.decode(token_ids.tolist())[::-1]
 
 
-def _split_checkpoint_name(
-    checkpoint_name: str,
-) -> tuple[str, str]:
-    checkpoint_name_path = Path(
-        checkpoint_name
-    )
-
-    checkpoint_file_stem = (
-        checkpoint_name_path.stem
-    )
-
-    checkpoint_file_suffix = (
-        checkpoint_name_path.suffix
-        or ".pt"
-    )
+def _split_checkpoint_name(checkpoint_name: str) -> tuple[str, str]:
+    checkpoint_name_path = Path(checkpoint_name)
+    checkpoint_file_stem = checkpoint_name_path.stem
+    checkpoint_file_suffix = checkpoint_name_path.suffix or ".pt"
 
     if not checkpoint_file_stem:
-        raise ValueError(
-            "checkpoint_name must contain "
-            "a file name."
-        )
+        raise ValueError("checkpoint_name must contain a file name.")
 
-    return (
-        checkpoint_file_stem,
-        checkpoint_file_suffix,
-    )
+    return checkpoint_file_stem, checkpoint_file_suffix
 
 
 def _runtime_metadata(
@@ -1274,34 +866,17 @@ def _runtime_metadata(
     )
 
     model_configuration = {
-        configuration_name: getattr(
-            model,
-            configuration_name,
-        )
-        for configuration_name
-        in model_configuration_names
-        if hasattr(
-            model,
-            configuration_name,
-        )
+        configuration_name: getattr(model, configuration_name)
+        for configuration_name in model_configuration_names
+        if hasattr(model, configuration_name)
     }
 
     return {
-        "model_class": (
-            type(model).__name__
-        ),
-        "model_configuration": (
-            model_configuration
-        ),
-        "optimizer_class": (
-            type(optimizer).__name__
-        ),
-        "data_stream_class": (
-            type(data_stream).__name__
-        ),
-        "torch_version": (
-            torch.__version__
-        ),
+        "model_class": type(model).__name__,
+        "model_configuration": model_configuration,
+        "optimizer_class": type(optimizer).__name__,
+        "data_stream_class": type(data_stream).__name__,
+        "torch_version": torch.__version__,
     }
 
 
@@ -1318,29 +893,41 @@ def _validate_runtime_metadata(
 
     mismatches = {
         key: {
-            "saved": (
-                saved_runtime_metadata.get(
-                    key
-                )
-            ),
-            "current": (
-                current_runtime_metadata.get(
-                    key
-                )
-            ),
+            "saved": saved_runtime_metadata.get(key),
+            "current": current_runtime_metadata.get(key),
         }
         for key in compatibility_keys
-        if (
-            saved_runtime_metadata.get(key)
-            != current_runtime_metadata.get(key)
-        )
+        if saved_runtime_metadata.get(key)
+        != current_runtime_metadata.get(key)
     }
 
     if mismatches:
         raise ValueError(
-            "The checkpoint does not match "
-            "the current training objects: "
+            "The checkpoint does not match the current training objects: "
             f"{mismatches}"
+        )
+
+
+def _validate_length_buckets(
+    length_buckets: tuple[int, ...],
+    maximum_operand_length: int,
+) -> None:
+    if not length_buckets:
+        raise ValueError("length_buckets must not be empty.")
+
+    if any(bucket_length <= 0 for bucket_length in length_buckets):
+        raise ValueError("Every length bucket must be greater than 0.")
+
+    if tuple(sorted(set(length_buckets))) != length_buckets:
+        raise ValueError(
+            "length_buckets must be unique and ordered from smallest "
+            "to largest."
+        )
+
+    if length_buckets[-1] < maximum_operand_length:
+        raise ValueError(
+            "The largest length bucket must be at least "
+            f"{maximum_operand_length}."
         )
 
 
@@ -1357,36 +944,22 @@ def _validate_training_configuration(
     positive_integer_values = {
         "steps": steps,
         "log_interval": log_interval,
-        "validation_interval": (
-            validation_interval
-        ),
-        "validation_steps": (
-            validation_steps
-        ),
+        "validation_interval": validation_interval,
+        "validation_steps": validation_steps,
         "plot_interval": plot_interval,
-        "checkpoint_interval": (
-            checkpoint_interval
-        ),
+        "checkpoint_interval": checkpoint_interval,
     }
 
-    for (
-        value_name,
-        value,
-    ) in positive_integer_values.items():
+    for value_name, value in positive_integer_values.items():
         if value <= 0:
-            raise ValueError(
-                f"{value_name} must be "
-                "greater than 0."
-            )
+            raise ValueError(f"{value_name} must be greater than 0.")
 
     if validation_lookahead_steps < 0:
         raise ValueError(
-            "validation_lookahead_steps "
-            "must be non-negative."
+            "validation_lookahead_steps must be non-negative."
         )
 
     if gradient_clip_norm <= 0:
         raise ValueError(
-            "gradient_clip_norm must be "
-            "greater than 0."
+            "gradient_clip_norm must be greater than 0."
         )

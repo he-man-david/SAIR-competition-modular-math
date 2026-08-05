@@ -226,7 +226,12 @@ class LatticeMultiplicationLoopTransformer(nn.Module):
             "batch features row column -> batch row column features",
         )
 
-        product_state = self.initial_product_state.expand(
+        current_product_seq_len = 2 * seq_len + 1
+
+        product_state = self.initial_product_state[
+            :,
+            :current_product_seq_len,
+        ].expand(
             batch_size,
             -1,
             -1,
